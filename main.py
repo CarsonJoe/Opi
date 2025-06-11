@@ -51,6 +51,9 @@ class OpiVoiceAssistant:
         # Timing and monitoring
         self.timing_tracker = TimingTracker()
         
+        # Debug mode
+        self.debug = os.getenv('OPI_DEBUG', '0') == '1'
+        
     async def initialize(self):
         """Initialize all components."""
         cprint("[Opi] Initializing voice assistant...", "cyan")
@@ -60,6 +63,10 @@ class OpiVoiceAssistant:
         
         # Initialize LLM components
         await self._init_llm_components()
+        
+        # Test LLM processing
+        if self.debug:
+            await self._test_llm_processing()
         
         cprint("[Opi] ✅ All components initialized successfully", "green")
         
@@ -95,6 +102,15 @@ class OpiVoiceAssistant:
         """Initialize LLM and MCP components."""
         cprint("[Opi] Initializing LLM and MCP tools...", "yellow")
         
+        # Validate LLM configuration
+        if not self.config.llm.api_key:
+            cprint("[Opi] ❌ No LLM API key configured!", "red")
+            cprint("       Set OPENAI_API_KEY environment variable", "yellow")
+            cprint("       The assistant will use fallback responses only", "yellow")
+        else:
+            if self.debug:
+                cprint(f"[Opi] LLM API key configured: {self.config.llm.api_key[:10]}...", "green")
+        
         # MCP manager for tool integration
         self.mcp_manager = MCPManager(
             server_configs=self.config.mcp.servers,
@@ -111,7 +127,30 @@ class OpiVoiceAssistant:
         )
         await self.conversation_manager.initialize()
         
+        if self.debug:
+            cprint(f"[Opi] ConversationManager type: {type(self.conversation_manager)}", "cyan")
+            cprint(f"[Opi] ConversationManager module: {self.conversation_manager.__class__.__module__}", "cyan")
+        
         cprint(f"[Opi] ✅ LLM ready with {len(self.mcp_manager.get_tools())} MCP tools", "green")
+        
+    async def _test_llm_processing(self):
+        """Test LLM processing functionality."""
+        cprint("[Opi] Testing LLM processing...", "yellow")
+        try:
+            test_responses = []
+            async for chunk in self.conversation_manager.process_user_input("hello", time.time()):
+                test_responses.append(chunk)
+            
+            if test_responses:
+                full_response = "".join(test_responses)
+                cprint(f"[Opi] ✅ LLM test successful: '{full_response[:50]}...'", "green")
+            else:
+                cprint("[Opi] ⚠️ LLM test returned no response", "yellow")
+        except Exception as e:
+            cprint(f"[Opi] ❌ LLM test failed: {e}", "red")
+            if self.debug:
+                import traceback
+                traceback.print_exc()
         
     async def start_listening(self):
         """Start the main voice interaction loop."""
@@ -119,7 +158,7 @@ class OpiVoiceAssistant:
             raise RuntimeError("Components not initialized. Call initialize() first.")
             
         self.running = True
-        cprint("[Opi] 🎤 Starting voice assistant... Say 'Hey Opi' to begin!", "blue")
+        cprint("[Opi] 🎤 Starting voice assistant... Listening for any speech!", "blue")
         
         # Start worker threads
         speech_thread = threading.Thread(
@@ -166,6 +205,9 @@ class OpiVoiceAssistant:
                     self.timing_tracker.add_timing('stt', timings['transcription_duration'])
         except Exception as e:
             cprint(f"[Opi] Speech worker error: {e}", "red")
+            if self.debug:
+                import traceback
+                traceback.print_exc()
             self.stop_event.set()
             
     def _run_tts_worker(self):
@@ -185,6 +227,9 @@ class OpiVoiceAssistant:
                     self.timing_tracker.add_timing('tts', timings['tts_generation_duration'])
         except Exception as e:
             cprint(f"[Opi] TTS worker error: {e}", "red")
+            if self.debug:
+                import traceback
+                traceback.print_exc()
             self.stop_event.set()
             
     def _run_audio_worker(self):
@@ -199,11 +244,16 @@ class OpiVoiceAssistant:
                 )
         except Exception as e:
             cprint(f"[Opi] Audio worker error: {e}", "red")
+            if self.debug:
+                import traceback
+                traceback.print_exc()
             self.stop_event.set()
             
     async def _main_loop(self):
         """Main interaction loop that processes voice input and generates responses."""
-        wake_word_detected = False
+        interaction_count = 0
+        
+        cprint("[Opi] 🎤 Ready! Listening for any speech...", "green")
         
         while self.running and not self.stop_event.is_set():
             try:
@@ -218,24 +268,22 @@ class OpiVoiceAssistant:
                 user_text = speech_data['text'].strip()
                 speech_end_time = speech_data['user_speech_end_time']
                 
+                if self.debug:
+                    cprint(f"[DEBUG] Received speech data: {speech_data}", "cyan")
+                
                 if not user_text:
+                    if self.debug:
+                        cprint("[DEBUG] Empty user text, skipping", "yellow")
                     continue
                     
-                # Check for wake word or if already activated
-                if not wake_word_detected:
-                    if self._detect_wake_word(user_text):
-                        wake_word_detected = True
-                        cprint("[Opi] 👋 Wake word detected! Listening...", "green")
-                        self._queue_response("Hello! How can I help you?")
-                        continue
-                    else:
-                        continue  # Ignore speech until wake word
-                        
-                # Process user input
-                cprint(f"[Opi] User: {user_text}", "white")
+                # Process any speech input immediately
+                interaction_count += 1
+                cprint(f"[Opi] 👂 Heard: \"{user_text}\"", "white")
+                cprint(f"[Opi] 🤖 Processing request #{interaction_count}...", "blue")
                 
                 # Check for exit commands
                 if self._is_exit_command(user_text):
+                    cprint("[Opi] 👋 Goodbye command detected", "yellow")
                     self._queue_response("Goodbye!")
                     await asyncio.sleep(2)  # Wait for response to play
                     break
@@ -244,54 +292,90 @@ class OpiVoiceAssistant:
                 response_start_time = time.time()
                 
                 try:
+                    if self.debug:
+                        cprint(f"[DEBUG] Calling conversation_manager.process_user_input with: '{user_text}'", "cyan")
+                    
+                    response_chunks = []
+                    chunk_count = 0
+                    
                     async for response_chunk in self.conversation_manager.process_user_input(
                         user_text, 
                         speech_end_time
                     ):
-                        if response_chunk.strip():
+                        if response_chunk and response_chunk.strip():
+                            chunk_count += 1
+                            response_chunks.append(response_chunk)
+                            
+                            if self.debug:
+                                cprint(f"[DEBUG] Got response chunk #{chunk_count}: '{response_chunk[:50]}...'", "green")
+                            
+                            # Queue for TTS
                             self.text_queue.put(response_chunk)
                             
                     # Mark end of response
                     self.text_queue.put(None)
                     
-                    response_time = time.time() - response_start_time
-                    self.timing_tracker.add_timing('llm_response', response_time)
+                    # Log complete response
+                    if response_chunks:
+                        full_response = "".join(response_chunks)
+                        cprint(f"[Opi] 🗣️ Response: \"{full_response}\"", "green")
+                        
+                        response_time = time.time() - response_start_time
+                        self.timing_tracker.add_timing('llm_response', response_time)
+                        
+                        if self.debug:
+                            cprint(f"[DEBUG] LLM response completed in {response_time:.2f}s with {chunk_count} chunks", "cyan")
+                    else:
+                        cprint("[Opi] ⚠️ No response received from LLM", "yellow")
+                        self._queue_response("I'm sorry, I didn't understand that. Could you try again?")
                     
                 except Exception as e:
-                    cprint(f"[Opi] Error processing input: {e}", "red")
+                    cprint(f"[Opi] ❌ Error processing input: {e}", "red")
+                    if self.debug:
+                        import traceback
+                        traceback.print_exc()
                     self._queue_response("Sorry, I encountered an error processing your request.")
                     
-                # Reset wake word after processing (require wake word for next interaction)
-                if self.config.voice.require_wake_word_each_time:
-                    wake_word_detected = False
-                    
             except Exception as e:
-                cprint(f"[Opi] Main loop error: {e}", "red")
+                cprint(f"[Opi] ❌ Main loop error: {e}", "red")
+                if self.debug:
+                    import traceback
+                    traceback.print_exc()
                 await asyncio.sleep(0.1)
                 
     def _get_speech_input(self, timeout: float) -> Optional[Dict[str, Any]]:
         """Get speech input from queue with timeout."""
         try:
-            return self.speech_queue.get(timeout=timeout)
+            result = self.speech_queue.get(timeout=timeout)
+            if self.debug and result:
+                cprint(f"[DEBUG] Retrieved from speech_queue: text='{result.get('text', '')}', time={result.get('user_speech_end_time', 0)}", "cyan")
+            return result
         except queue.Empty:
             return None
             
     def _detect_wake_word(self, text: str) -> bool:
-        """Detect wake word in speech text."""
-        text_lower = text.lower().strip()
-        wake_words = self.config.voice.wake_words
-        
-        return any(wake_word.lower() in text_lower for wake_word in wake_words)
+        """Detect wake word in speech text. (DISABLED - will be handled at audio level)"""
+        # This function is kept for compatibility but always returns False
+        # Wake word detection will be implemented at the audio capture level
+        return False
         
     def _is_exit_command(self, text: str) -> bool:
         """Check if text contains exit command."""
         text_lower = text.lower().strip()
-        exit_phrases = ["goodbye", "bye bye", "exit", "quit", "stop listening"]
+        exit_phrases = ["goodbye", "bye bye", "exit", "quit", "stop listening", "see you later", "that's all"]
         
-        return any(phrase in text_lower for phrase in exit_phrases)
+        is_exit = any(phrase in text_lower for phrase in exit_phrases)
+        
+        if self.debug and is_exit:
+            cprint(f"[DEBUG] Exit command detected: '{text}'", "yellow")
+        
+        return is_exit
         
     def _queue_response(self, text: str):
         """Queue text response for TTS."""
+        if self.debug:
+            cprint(f"[DEBUG] Queueing response: '{text}'", "green")
+        
         self.text_queue.put(text)
         self.text_queue.put(None)  # End marker
         
@@ -338,10 +422,16 @@ async def main():
     parser = argparse.ArgumentParser(description="Opi Voice Assistant")
     parser.add_argument("--config", help="Path to configuration file")
     parser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose logging")
+    parser.add_argument("--debug", "-d", action="store_true", help="Enable debug mode")
     parser.add_argument("--list-devices", action="store_true", help="List audio devices and exit")
     parser.add_argument("--test-voice", action="store_true", help="Test voice components and exit")
+    parser.add_argument("--test-llm", action="store_true", help="Test LLM integration and exit")
     
     args = parser.parse_args()
+    
+    # Set debug mode
+    if args.debug:
+        os.environ['OPI_DEBUG'] = '1'
     
     if args.list_devices:
         from voice.audio_utils import list_audio_devices
@@ -364,6 +454,15 @@ async def main():
             await asyncio.sleep(3)
             return
             
+        if args.test_llm:
+            cprint("[Opi] Testing LLM integration...", "cyan")
+            test_inputs = ["hello", "what time is it", "system status"]
+            for test_input in test_inputs:
+                cprint(f"[Test] Input: {test_input}", "yellow")
+                async for chunk in opi.conversation_manager.process_user_input(test_input, time.time()):
+                    cprint(f"[Test] Output: {chunk}", "green")
+            return
+            
         await opi.start_listening()
         
     except Exception as e:
@@ -374,4 +473,4 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main()) 
+    asyncio.run(main())

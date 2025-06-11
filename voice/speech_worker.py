@@ -25,18 +25,18 @@ class SpeechWorker:
     def __init__(self, model_size="tiny.en", compute_type="int8"):
         # Audio parameters
         self.target_sample_rate = 16000
-        self.min_chunk_duration = 1.0
-        self.max_chunk_duration = 30.0
+        self.min_chunk_duration = 0.0
+        self.max_chunk_duration = 8.0
         self.channels = 1
 
         # VAD Parameters
-        self.silence_threshold = 0.01
-        self.silence_duration = 1.0  # For individual chunk segmentation
-        self.buffer_size = 0.1  # 100ms buffers
+        self.silence_threshold = 200.0
+        self.silence_duration = 0.4  # For individual chunk segmentation
+        self.buffer_size = 0.05  # 100ms buffers
         self.pre_record_duration = 0.5
 
         # Utterance aggregation parameter
-        self.end_of_utterance_silence_duration = 2.0
+        self.end_of_utterance_silence_duration = 1.0
 
         # Speech detection for filtering silent chunks
         self.min_speech_ratio = 0.1
