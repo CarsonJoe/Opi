@@ -37,9 +37,7 @@ cache/
 *.log
 
 # Models
-models/*.onnx
-models/*.json
-models/*.bin
+models/
 
 # IDE
 .vscode/

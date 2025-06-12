@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Opi Voice Assistant - Orange Pi Voice Assistant with MCP Integration
-Main application that combines voice I/O with MCP tool system
+Opi Voice Assistant - COMPLETE REPLACEMENT with Ultra-Low Latency Streaming
+Main application that combines voice I/O with streaming TTS pipeline
 """
 
 import asyncio
@@ -22,12 +22,12 @@ from voice.speech_worker import SpeechWorker
 from voice.tts_worker import TTSWorker
 from voice.audio_worker import AudioWorker
 from llm.mcp_manager import MCPManager
-from llm.conversation_manager import ConversationManager
+from llm.conversation_manager import ConversationManager  # Now uses streaming version
 from config.settings import OpiConfig
 from utils.timing import TimingTracker
 
 class OpiVoiceAssistant:
-    """Main Opi Voice Assistant application."""
+    """Main Opi Voice Assistant application with streaming capabilities."""
     
     def __init__(self, config_path: Optional[str] = None):
         self.config = OpiConfig.load(config_path)
@@ -51,12 +51,19 @@ class OpiVoiceAssistant:
         # Timing and monitoring
         self.timing_tracker = TimingTracker()
         
+        # Streaming performance metrics
+        self.streaming_metrics = {
+            'total_interactions': 0,
+            'first_audio_times': [],
+            'total_response_times': [],
+        }
+        
         # Debug mode
         self.debug = os.getenv('OPI_DEBUG', '0') == '1'
         
     async def initialize(self):
         """Initialize all components."""
-        cprint("[Opi] Initializing voice assistant...", "cyan")
+        cprint("[Opi] Initializing voice assistant with streaming...", "cyan", attrs=['bold'])
         
         # Initialize voice components
         await self._init_voice_components()
@@ -66,9 +73,9 @@ class OpiVoiceAssistant:
         
         # Test LLM processing
         if self.debug:
-            await self._test_llm_processing()
+            await self._test_streaming_processing()
         
-        cprint("[Opi] ✅ All components initialized successfully", "green")
+        cprint("[Opi] ✅ All components initialized with streaming support", "green", attrs=['bold'])
         
     async def _init_voice_components(self):
         """Initialize speech recognition, TTS, and audio components."""
@@ -100,13 +107,13 @@ class OpiVoiceAssistant:
         
     async def _init_llm_components(self):
         """Initialize LLM and MCP components."""
-        cprint("[Opi] Initializing LLM and MCP tools...", "yellow")
+        cprint("[Opi] Initializing streaming LLM and MCP tools...", "yellow")
         
         # Validate LLM configuration
         if not self.config.llm.api_key:
             cprint("[Opi] ❌ No LLM API key configured!", "red")
-            cprint("       Set OPENAI_API_KEY environment variable", "yellow")
-            cprint("       The assistant will use fallback responses only", "yellow")
+            cprint("       Set GOOGLE_API_KEY environment variable", "yellow")
+            cprint("       he assistant will use fallback responses only", "yellow")
         else:
             if self.debug:
                 cprint(f"[Opi] LLM API key configured: {self.config.llm.api_key[:10]}...", "green")
@@ -118,7 +125,7 @@ class OpiVoiceAssistant:
         )
         await self.mcp_manager.initialize()
         
-        # Conversation manager
+        # Conversation manager with streaming support
         self.conversation_manager = ConversationManager(
             llm_config=self.config.llm,
             system_prompt=self.config.prompts.system_prompt,
@@ -128,26 +135,36 @@ class OpiVoiceAssistant:
         await self.conversation_manager.initialize()
         
         if self.debug:
-            cprint(f"[Opi] ConversationManager type: {type(self.conversation_manager)}", "cyan")
-            cprint(f"[Opi] ConversationManager module: {self.conversation_manager.__class__.__module__}", "cyan")
+            cprint(f"[Opi] ConversationManager: Enhanced with streaming support", "cyan")
         
-        cprint(f"[Opi] ✅ LLM ready with {len(self.mcp_manager.get_tools())} MCP tools", "green")
+        cprint(f"[Opi] ✅ Streaming LLM ready with {len(self.mcp_manager.get_tools())} MCP tools", "green")
         
-    async def _test_llm_processing(self):
-        """Test LLM processing functionality."""
-        cprint("[Opi] Testing LLM processing...", "yellow")
+    async def _test_streaming_processing(self):
+        """Test streaming processing functionality."""
+        cprint("[Opi] Testing streaming pipeline...", "yellow")
         try:
-            test_responses = []
-            async for chunk in self.conversation_manager.process_user_input("hello", time.time()):
-                test_responses.append(chunk)
+            test_start = time.time()
             
-            if test_responses:
-                full_response = "".join(test_responses)
-                cprint(f"[Opi] ✅ LLM test successful: '{full_response[:50]}...'", "green")
+            # Test the streaming method
+            first_audio_time = await self.conversation_manager.process_user_input_streaming(
+                "hello", 
+                time.time(), 
+                self.tts_worker, 
+                self.audio_worker
+            )
+            
+            test_duration = time.time() - test_start
+            
+            if first_audio_time:
+                first_audio_latency = first_audio_time - test_start
+                cprint(f"[Opi] ✅ Streaming test successful!", "green")
+                cprint(f"[Opi] ⚡ First audio latency: {first_audio_latency:.3f}s", "green", attrs=['bold'])
+                cprint(f"[Opi] 📊 Total test time: {test_duration:.3f}s", "white")
             else:
-                cprint("[Opi] ⚠️ LLM test returned no response", "yellow")
+                cprint("[Opi] ⚠️ Streaming test completed but no first audio time recorded", "yellow")
+                
         except Exception as e:
-            cprint(f"[Opi] ❌ LLM test failed: {e}", "red")
+            cprint(f"[Opi] ❌ Streaming test failed: {e}", "red")
             if self.debug:
                 import traceback
                 traceback.print_exc()
@@ -158,7 +175,7 @@ class OpiVoiceAssistant:
             raise RuntimeError("Components not initialized. Call initialize() first.")
             
         self.running = True
-        cprint("[Opi] 🎤 Starting voice assistant... Listening for any speech!", "blue")
+        cprint("[Opi] 🚀 Starting streaming voice assistant... Listening for any speech!", "blue", attrs=['bold'])
         
         # Start worker threads
         speech_thread = threading.Thread(
@@ -167,25 +184,11 @@ class OpiVoiceAssistant:
             daemon=True
         )
         
-        tts_thread = threading.Thread(
-            target=self._run_tts_worker,
-            name="TTSWorker", 
-            daemon=True
-        )
-        
-        audio_thread = threading.Thread(
-            target=self._run_audio_worker,
-            name="AudioWorker",
-            daemon=True
-        )
-        
         speech_thread.start()
-        tts_thread.start()
-        audio_thread.start()
         
-        # Main interaction loop
+        # Main interaction loop (no separate TTS/audio threads - handled by streaming pipeline)
         try:
-            await self._main_loop()
+            await self._streaming_main_loop()
         except KeyboardInterrupt:
             cprint("\n[Opi] Shutting down...", "yellow")
         finally:
@@ -210,50 +213,11 @@ class OpiVoiceAssistant:
                 traceback.print_exc()
             self.stop_event.set()
             
-    def _run_tts_worker(self):
-        """Run TTS synthesis in separate thread."""
-        try:
-            while self.running and not self.stop_event.is_set():
-                timings = {}
-                self.tts_worker.process_synthesis(
-                    self.text_queue,
-                    self.audio_queue,
-                    self.stop_event,
-                    timings,
-                    self.config.voice.speech_speed,
-                    self.config.storage.output_dir
-                )
-                if timings.get('tts_generation_duration'):
-                    self.timing_tracker.add_timing('tts', timings['tts_generation_duration'])
-        except Exception as e:
-            cprint(f"[Opi] TTS worker error: {e}", "red")
-            if self.debug:
-                import traceback
-                traceback.print_exc()
-            self.stop_event.set()
-            
-    def _run_audio_worker(self):
-        """Run audio playback in separate thread."""
-        try:
-            while self.running and not self.stop_event.is_set():
-                timings = {}
-                self.audio_worker.process_playback(
-                    self.audio_queue,
-                    self.stop_event,
-                    timings
-                )
-        except Exception as e:
-            cprint(f"[Opi] Audio worker error: {e}", "red")
-            if self.debug:
-                import traceback
-                traceback.print_exc()
-            self.stop_event.set()
-            
-    async def _main_loop(self):
-        """Main interaction loop that processes voice input and generates responses."""
+    async def _streaming_main_loop(self):
+        """OPTIMIZED main loop with streaming pipeline."""
         interaction_count = 0
         
-        cprint("[Opi] 🎤 Ready! Listening for any speech...", "green")
+        cprint("[Opi] 🎤 Ready! Listening for any speech...", "green", attrs=['bold'])
         
         while self.running and not self.stop_event.is_set():
             try:
@@ -276,65 +240,21 @@ class OpiVoiceAssistant:
                         cprint("[DEBUG] Empty user text, skipping", "yellow")
                     continue
                     
-                # Process any speech input immediately
+                # Process with streaming pipeline
                 interaction_count += 1
+                self.streaming_metrics['total_interactions'] = interaction_count
+                
                 cprint(f"[Opi] 👂 Heard: \"{user_text}\"", "white")
-                cprint(f"[Opi] 🤖 Processing request #{interaction_count}...", "blue")
+                cprint(f"[Opi] 🚀 Processing with streaming pipeline #{interaction_count}...", "blue", attrs=['bold'])
                 
                 # Check for exit commands
                 if self._is_exit_command(user_text):
                     cprint("[Opi] 👋 Goodbye command detected", "yellow")
-                    self._queue_response("Goodbye!")
-                    await asyncio.sleep(2)  # Wait for response to play
+                    await self._handle_goodbye()
                     break
                     
-                # Generate response using LLM + MCP tools
-                response_start_time = time.time()
-                
-                try:
-                    if self.debug:
-                        cprint(f"[DEBUG] Calling conversation_manager.process_user_input with: '{user_text}'", "cyan")
-                    
-                    response_chunks = []
-                    chunk_count = 0
-                    
-                    async for response_chunk in self.conversation_manager.process_user_input(
-                        user_text, 
-                        speech_end_time
-                    ):
-                        if response_chunk and response_chunk.strip():
-                            chunk_count += 1
-                            response_chunks.append(response_chunk)
-                            
-                            if self.debug:
-                                cprint(f"[DEBUG] Got response chunk #{chunk_count}: '{response_chunk[:50]}...'", "green")
-                            
-                            # Queue for TTS
-                            self.text_queue.put(response_chunk)
-                            
-                    # Mark end of response
-                    self.text_queue.put(None)
-                    
-                    # Log complete response
-                    if response_chunks:
-                        full_response = "".join(response_chunks)
-                        cprint(f"[Opi] 🗣️ Response: \"{full_response}\"", "green")
-                        
-                        response_time = time.time() - response_start_time
-                        self.timing_tracker.add_timing('llm_response', response_time)
-                        
-                        if self.debug:
-                            cprint(f"[DEBUG] LLM response completed in {response_time:.2f}s with {chunk_count} chunks", "cyan")
-                    else:
-                        cprint("[Opi] ⚠️ No response received from LLM", "yellow")
-                        self._queue_response("I'm sorry, I didn't understand that. Could you try again?")
-                    
-                except Exception as e:
-                    cprint(f"[Opi] ❌ Error processing input: {e}", "red")
-                    if self.debug:
-                        import traceback
-                        traceback.print_exc()
-                    self._queue_response("Sorry, I encountered an error processing your request.")
+                # MAIN STREAMING PROCESSING
+                await self._process_with_streaming_pipeline(user_text, speech_end_time)
                     
             except Exception as e:
                 cprint(f"[Opi] ❌ Main loop error: {e}", "red")
@@ -343,6 +263,74 @@ class OpiVoiceAssistant:
                     traceback.print_exc()
                 await asyncio.sleep(0.1)
                 
+    async def _process_with_streaming_pipeline(self, user_text: str, speech_end_time: float):
+        """Process user input with ultra-low latency streaming."""
+        
+        interaction_start = time.time()
+        
+        try:
+            if self.debug:
+                cprint(f"[DEBUG] Starting streaming processing for: '{user_text}'", "cyan")
+            
+            # Use the enhanced conversation manager's streaming method
+            first_audio_time = await self.conversation_manager.process_user_input_streaming(
+                user_text, 
+                speech_end_time, 
+                self.tts_worker, 
+                self.audio_worker
+            )
+            
+            # Calculate and log performance metrics
+            total_time = time.time() - interaction_start
+            
+            if first_audio_time:
+                first_audio_latency = first_audio_time - speech_end_time
+                self.streaming_metrics['first_audio_times'].append(first_audio_latency)
+                self.timing_tracker.add_timing('first_audio_latency', first_audio_latency)
+                
+                cprint(f"[Opi] ⚡ FIRST AUDIO: {first_audio_latency:.3f}s", "green", attrs=['bold'])
+            
+            self.streaming_metrics['total_response_times'].append(total_time)
+            self.timing_tracker.add_timing('streaming_response', total_time)
+            
+            cprint(f"[Opi] ✅ Complete streaming response in {total_time:.3f}s", "green")
+            
+            if self.debug:
+                avg_first_audio = sum(self.streaming_metrics['first_audio_times']) / len(self.streaming_metrics['first_audio_times']) if self.streaming_metrics['first_audio_times'] else 0
+                cprint(f"[DEBUG] Average first audio latency: {avg_first_audio:.3f}s", "cyan")
+                
+        except Exception as e:
+            cprint(f"[Opi] ❌ Streaming pipeline error: {e}", "red")
+            if self.debug:
+                import traceback
+                traceback.print_exc()
+            
+            # Fallback to simple error response
+            await self._stream_simple_response("Sorry, I encountered an error processing your request.")
+    
+    async def _stream_simple_response(self, text: str):
+        """Stream a simple text response using the pipeline."""
+        try:
+            # Use the streaming method for simple responses too
+            await self.conversation_manager.process_user_input_streaming(
+                "error_response", 
+                time.time(), 
+                self.tts_worker, 
+                self.audio_worker
+            )
+        except Exception as e:
+            cprint(f"[Opi] Error streaming simple response: {e}", "red")
+            # Ultimate fallback - just print
+            cprint(f"[Opi] 🗣️ {text}", "blue")
+    
+    async def _handle_goodbye(self):
+        """Handle goodbye command with streaming."""
+        try:
+            await self._stream_simple_response("Goodbye!")
+            await asyncio.sleep(3)  # Wait for goodbye to play
+        except Exception as e:
+            cprint(f"[Opi] Error in goodbye: {e}", "red")
+            
     def _get_speech_input(self, timeout: float) -> Optional[Dict[str, Any]]:
         """Get speech input from queue with timeout."""
         try:
@@ -353,12 +341,6 @@ class OpiVoiceAssistant:
         except queue.Empty:
             return None
             
-    def _detect_wake_word(self, text: str) -> bool:
-        """Detect wake word in speech text. (DISABLED - will be handled at audio level)"""
-        # This function is kept for compatibility but always returns False
-        # Wake word detection will be implemented at the audio capture level
-        return False
-        
     def _is_exit_command(self, text: str) -> bool:
         """Check if text contains exit command."""
         text_lower = text.lower().strip()
@@ -370,18 +352,74 @@ class OpiVoiceAssistant:
             cprint(f"[DEBUG] Exit command detected: '{text}'", "yellow")
         
         return is_exit
+    
+    def print_streaming_performance_summary(self):
+        """Print comprehensive streaming performance summary."""
+        cprint("\n" + "="*60, "cyan", attrs=['bold'])
+        cprint("🚀 STREAMING PERFORMANCE SUMMARY", "cyan", attrs=['bold'])
+        cprint("="*60, "cyan", attrs=['bold'])
         
-    def _queue_response(self, text: str):
-        """Queue text response for TTS."""
-        if self.debug:
-            cprint(f"[DEBUG] Queueing response: '{text}'", "green")
+        metrics = self.streaming_metrics
         
-        self.text_queue.put(text)
-        self.text_queue.put(None)  # End marker
+        # Interaction count
+        cprint(f"📊 Total Interactions: {metrics['total_interactions']}", "white")
+        
+        # First audio latency (most critical metric)
+        if metrics['first_audio_times']:
+            avg_first_audio = sum(metrics['first_audio_times']) / len(metrics['first_audio_times'])
+            min_first_audio = min(metrics['first_audio_times'])
+            max_first_audio = max(metrics['first_audio_times'])
+            
+            cprint(f"\n⚡ FIRST AUDIO LATENCY (Key Metric):", "yellow", attrs=['bold'])
+            cprint(f"   Average: {avg_first_audio:.3f}s", "white")
+            cprint(f"   Best:    {min_first_audio:.3f}s", "green")
+            cprint(f"   Worst:   {max_first_audio:.3f}s", "red" if max_first_audio > 1.0 else "white")
+            
+            # Performance rating
+            if avg_first_audio < 0.5:
+                cprint("   Rating:  ⭐⭐⭐ EXCELLENT - Under 500ms!", "green", attrs=['bold'])
+            elif avg_first_audio < 1.0:
+                cprint("   Rating:  ⭐⭐ GOOD - Under 1 second", "green")
+            elif avg_first_audio < 2.0:
+                cprint("   Rating:  ⭐ FAIR - Could be improved", "yellow")
+            else:
+                cprint("   Rating:  ❌ SLOW - Needs optimization", "red")
+        
+        # Total response times
+        if metrics['total_response_times']:
+            avg_total = sum(metrics['total_response_times']) / len(metrics['total_response_times'])
+            cprint(f"\n📈 Total Response Times:", "yellow")
+            cprint(f"   Average: {avg_total:.3f}s", "white")
+        
+        # Component breakdown
+        cprint(f"\n🔧 Component Performance:", "yellow")
+        
+        stt_avg = self.timing_tracker.get_average('stt')
+        if stt_avg:
+            cprint(f"   STT:     {stt_avg:.3f}s", "white")
+        
+        streaming_avg = self.timing_tracker.get_average('streaming_response')
+        if streaming_avg:
+            cprint(f"   Streaming: {streaming_avg:.3f}s", "white")
+        
+        # Recommendations
+        if metrics['first_audio_times']:
+            cprint(f"\n💡 Optimization Tips:", "yellow")
+            if avg_first_audio > 1.0:
+                cprint("   • Consider using smaller TTS model", "cyan")
+                cprint("   • Check audio device buffer settings", "cyan")
+                cprint("   • Monitor system CPU usage", "cyan")
+            elif avg_first_audio > 0.5:
+                cprint("   • Fine-tune sentence detection thresholds", "cyan")
+                cprint("   • Consider TTS model optimization", "cyan")
+            else:
+                cprint("   • Performance is excellent! 🎉", "green")
+        
+        cprint("="*60, "cyan", attrs=['bold'])
         
     async def shutdown(self):
         """Gracefully shutdown all components."""
-        cprint("[Opi] Shutting down components...", "yellow")
+        cprint("[Opi] Shutting down streaming components...", "yellow")
         
         self.running = False
         self.stop_event.set()
@@ -401,10 +439,13 @@ class OpiVoiceAssistant:
         if self.mcp_manager:
             await self.mcp_manager.close()
             
-        # Print timing summary
+        # Print streaming performance summary
+        self.print_streaming_performance_summary()
+        
+        # Print standard timing summary
         self.timing_tracker.print_summary()
         
-        cprint("[Opi] ✅ Shutdown complete", "green")
+        cprint("[Opi] ✅ Streaming shutdown complete", "green")
 
 
 def setup_signal_handlers(opi: OpiVoiceAssistant):
@@ -419,13 +460,13 @@ def setup_signal_handlers(opi: OpiVoiceAssistant):
 
 async def main():
     """Main entry point."""
-    parser = argparse.ArgumentParser(description="Opi Voice Assistant")
+    parser = argparse.ArgumentParser(description="Opi Voice Assistant with Streaming")
     parser.add_argument("--config", help="Path to configuration file")
     parser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose logging")
     parser.add_argument("--debug", "-d", action="store_true", help="Enable debug mode")
     parser.add_argument("--list-devices", action="store_true", help="List audio devices and exit")
     parser.add_argument("--test-voice", action="store_true", help="Test voice components and exit")
-    parser.add_argument("--test-llm", action="store_true", help="Test LLM integration and exit")
+    parser.add_argument("--test-streaming", action="store_true", help="Test streaming pipeline and exit")
     
     args = parser.parse_args()
     
@@ -441,7 +482,7 @@ async def main():
     # Load environment variables
     load_dotenv()
     
-    # Initialize Opi
+    # Initialize Opi with streaming
     opi = OpiVoiceAssistant(config_path=args.config)
     setup_signal_handlers(opi)
     
@@ -450,17 +491,17 @@ async def main():
         
         if args.test_voice:
             cprint("[Opi] Testing voice components...", "cyan")
-            opi._queue_response("Voice test successful! All components are working.")
+            await opi._stream_simple_response("Voice test successful! Streaming pipeline is working.")
             await asyncio.sleep(3)
             return
             
-        if args.test_llm:
-            cprint("[Opi] Testing LLM integration...", "cyan")
-            test_inputs = ["hello", "what time is it", "system status"]
+        if args.test_streaming:
+            cprint("[Opi] Testing streaming pipeline...", "cyan")
+            test_inputs = ["hello", "what time is it", "system status", "goodbye"]
             for test_input in test_inputs:
                 cprint(f"[Test] Input: {test_input}", "yellow")
-                async for chunk in opi.conversation_manager.process_user_input(test_input, time.time()):
-                    cprint(f"[Test] Output: {chunk}", "green")
+                await opi._process_with_streaming_pipeline(test_input, time.time())
+                await asyncio.sleep(1)
             return
             
         await opi.start_listening()
