@@ -61,9 +61,62 @@ class OpiConfig:
     
     @classmethod
     def load(cls, config_path=None):
+        """FIXED: Actually load the JSON configuration file!"""
         load_dotenv()
+        
+        # Determine config file path
+        if config_path is None:
+            config_path = "config.json"
+        
+        # Load JSON config if it exists
+        config_data = {}
+        if Path(config_path).exists():
+            with open(config_path, 'r') as f:
+                config_data = json.load(f)
+            print(f"[Config] Loaded configuration from {config_path}")
+        else:
+            print(f"[Config] No config file found at {config_path}, using defaults")
+        
+        # Create config with loaded data
         config = cls()
-        config.llm.api_key = os.getenv("GOOGLE_API_KEY")
+        
+        # Load voice config
+        if 'voice' in config_data:
+            voice_data = config_data['voice']
+            for key, value in voice_data.items():
+                if hasattr(config.voice, key):
+                    setattr(config.voice, key, value)
+        
+        # Load LLM config
+        if 'llm' in config_data:
+            llm_data = config_data['llm']
+            for key, value in llm_data.items():
+                if hasattr(config.llm, key):
+                    setattr(config.llm, key, value)
+        
+        # Load other configs
+        if 'mcp' in config_data:
+            config.mcp.servers = config_data['mcp'].get('servers', {})
+        
+        if 'prompts' in config_data:
+            prompts_data = config_data['prompts']
+            for key, value in prompts_data.items():
+                if hasattr(config.prompts, key):
+                    setattr(config.prompts, key, value)
+        
+        if 'storage' in config_data:
+            storage_data = config_data['storage']
+            for key, value in storage_data.items():
+                if hasattr(config.storage, key):
+                    setattr(config.storage, key, value)
+        
+        # Set API key from environment if not in config
+        if not config.llm.api_key:
+            config.llm.api_key = os.getenv("GOOGLE_API_KEY")
+        
+        # Debug: Print loaded audio device
+        print(f"[Config] Audio device loaded: {config.voice.audio_device}")
+        
         return config
     
     def validate(self):
