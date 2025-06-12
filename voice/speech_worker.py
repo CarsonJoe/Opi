@@ -42,7 +42,6 @@ class SpeechWorker:
         self.min_speech_ratio = 0.1
 
         # Initialize model
-        print(f"[Speech] Loading Whisper model: {model_size}")
         self.model = WhisperModel(model_size, compute_type=compute_type)
         print(f"[Speech] ✅ Whisper model loaded: {model_size}")
 
@@ -144,10 +143,6 @@ class SpeechWorker:
         min_silence_buffers = int(self.silence_duration / self.buffer_size)
         is_recording = False
 
-        print(f"[Speech] Smart recording (chunk: {self.min_chunk_duration}-{self.max_chunk_duration}s, gap: {self.silence_duration}s)")
-        print(f"[Speech] VAD threshold: {self.silence_threshold}, min speech: {self.min_speech_ratio*100:.1f}%")
-        print("[Speech] 🎤 Listening for speech...")
-
         try:
             while not stop_event.is_set():
                 try:
@@ -173,7 +168,7 @@ class SpeechWorker:
                         chunk_start_time = time.time() - (len(pre_audio_buffer) * self.buffer_size)
                         audio_buffer = deque(pre_audio_buffer)
                         rms_buffer = deque(pre_rms_buffer)
-                        print(f"[Speech] 🎤 Started recording chunk_{chunk_id}")
+                        print(f"[Speech] 🎤 Listening")
 
                     # Continue recording
                     elif is_recording:
@@ -197,7 +192,7 @@ class SpeechWorker:
 
                         if should_finalize:
                             if not self._has_sufficient_speech(rms_buffer, self.silence_threshold, self.min_speech_ratio):
-                                print(f"[Speech] chunk_{chunk_id} {current_duration:.1f}s | SKIPPED (insufficient speech)")
+                                print(f"[Speech] No speech detected")
                             else:
                                 # Process and save audio chunk
                                 full_audio = np.concatenate(list(audio_buffer))
@@ -214,7 +209,6 @@ class SpeechWorker:
                                     'record_end_time': current_cycle_time
                                 }
                                 self.audio_queue.put(chunk_info)
-                                print(f"[Speech] 📝 Processing chunk_{chunk_id} ({current_duration:.1f}s)")
 
                             # Reset for next chunk
                             is_recording = False
@@ -222,7 +216,6 @@ class SpeechWorker:
                             audio_buffer.clear()
                             rms_buffer.clear()
                             chunk_id += 1
-                            print("[Speech] 🎤 Listening for speech...")
 
                 except sd.PortAudioError as pae:
                     print(f"[Speech] Audio error: {pae}")
@@ -278,7 +271,6 @@ class SpeechWorker:
                                     actual_chunk_speech_end_time -= self.silence_duration
                                 
                                 self.current_utterance_actual_speech_end_time = actual_chunk_speech_end_time
-                                print(f"[Speech] Transcript segment: \"{transcript.strip()}\"")
 
                 except queue.Empty:
                     pass
@@ -306,8 +298,6 @@ class SpeechWorker:
 
                             if user_speech_end_timestamp is None:
                                 user_speech_end_timestamp = self.last_transcript_time if self.last_transcript_time else time.time()
-
-                            print(f"[Speech] ✅ Utterance complete ({flush_reason}): \"{full_utterance}\"")
 
                             final_speech_queue.put({
                                 'text': full_utterance,
@@ -344,12 +334,11 @@ class SpeechWorker:
             timings['transcription_duration'] = transcription_duration
 
             reason_symbol = "⏰" if reason == "max_duration" else "🔇"
-            print(f"[Speech] chunk_{chunk_id} {duration:.1f}s {reason_symbol} | TX {transcription_duration:.2f}s")
 
             if transcript.strip():
                 return transcript
             else:
-                print(f"[Speech] No speech detected in chunk_{chunk_id}")
+                print(f"[Speech] No speech detected")
                 return None
                 
         except Exception as e:
