@@ -1,7 +1,7 @@
 # llm/conversation_manager.py
 """
-COMPLETE REPLACEMENT - Ultra-Low Latency Streaming Conversation Manager for Opi Voice Assistant
-Now with phrase-level streaming for dramatically reduced first audio latency
+Ultra-Low Latency Streaming Conversation Manager for Opi Voice Assistant
+with phrase-level streaming for dramatically reduced first audio latency
 """
 
 import asyncio
@@ -194,6 +194,8 @@ class UltraLowLatencyTTSPipeline:
             }
             self.phrase_queue.put(phrase_data, timeout=0.05)
             self.total_phrases += 1
+            cprint(f"{phrase.strip()}", "blue", attrs=['bold'])
+
             if debug:
                 cprint(f"[Pipeline] ⚡ Queued phrase: \"{phrase[:25]}...\"", "cyan")
         except queue.Full:

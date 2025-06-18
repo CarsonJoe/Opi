@@ -73,7 +73,8 @@ class AudioWorker:
                 if not first_chunk_played:
                     timings['playback_first_audio_chunk_played_time'] = time.time()
                     first_chunk_played = True
-                    cprint("[Audio] 🔊 Playing audio", "blue")
+                    if self.verbose:
+                        cprint("[Audio] 🔊 Playing audio", "blue")
                 
                 # Add pause between chunks
                 if chunk_count > 0 and self.chunk_pause_ms > 0:
