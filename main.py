@@ -79,7 +79,8 @@ class OpiVoiceAssistant:
         
     async def _init_voice_components(self):
         """Initialize speech recognition, TTS, and audio components."""
-        cprint("[Opi] Loading voice models...", "yellow")
+        if self.debug:
+            cprint("[Opi] Loading voice models...", "yellow")
         
         # Speech recognition
         self.speech_worker = SpeechWorker(
@@ -107,13 +108,14 @@ class OpiVoiceAssistant:
         
     async def _init_llm_components(self):
         """Initialize LLM and MCP components."""
-        cprint("[Opi] Initializing streaming LLM and MCP tools...", "yellow")
+        if self.debug:
+            cprint("[Opi] Initializing streaming LLM and MCP tools...", "yellow")
         
         # Validate LLM configuration
         if not self.config.llm.api_key:
             cprint("[Opi] ❌ No LLM API key configured!", "red")
-            cprint("       Set GOOGLE_API_KEY environment variable", "yellow")
-            cprint("       he assistant will use fallback responses only", "yellow")
+            cprint("       Set GOOGLE_API_KEY enviroment variable", "yellow")
+            cprint("       The assistant will use fallback responses only", "yellow")
         else:
             if self.debug:
                 cprint(f"[Opi] LLM API key configured: {self.config.llm.api_key[:10]}...", "green")
@@ -150,7 +152,8 @@ class OpiVoiceAssistant:
                 "hello", 
                 time.time(), 
                 self.tts_worker, 
-                self.audio_worker
+                self.audio_worker,
+                debug=self.debug
             )
             
             test_duration = time.time() - test_start
@@ -245,7 +248,8 @@ class OpiVoiceAssistant:
                 self.streaming_metrics['total_interactions'] = interaction_count
                 
                 cprint(f"[Opi] 👂 Heard: \"{user_text}\"", "white")
-                cprint(f"[Opi] 🚀 Processing with streaming pipeline #{interaction_count}...", "blue", attrs=['bold'])
+                if self.debug:
+                    cprint(f"[Opi] 🚀 Processing with streaming pipeline #{interaction_count}...", "blue", attrs=['bold'])
                 
                 # Check for exit commands
                 if self._is_exit_command(user_text):
@@ -277,7 +281,8 @@ class OpiVoiceAssistant:
                 user_text, 
                 speech_end_time, 
                 self.tts_worker, 
-                self.audio_worker
+                self.audio_worker,
+                debug=self.debug  # Pass debug parameter
             )
             
             # Calculate and log performance metrics
@@ -311,12 +316,15 @@ class OpiVoiceAssistant:
     async def _stream_simple_response(self, text: str):
         """Stream a simple text response using the pipeline."""
         try:
+            if self.debug:
+                cprint(f"[DEBUG] Streaming simple response: {text}", "cyan")
             # Use the streaming method for simple responses too
             await self.conversation_manager.process_user_input_streaming(
                 "error_response", 
                 time.time(), 
                 self.tts_worker, 
-                self.audio_worker
+                self.audio_worker,
+                debug=self.debug
             )
         except Exception as e:
             cprint(f"[Opi] Error streaming simple response: {e}", "red")
