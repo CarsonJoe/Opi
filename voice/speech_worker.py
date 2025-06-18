@@ -22,12 +22,13 @@ from pathlib import Path
 class SpeechWorker:
     """Worker for speech-to-text transcription with smart chunking and utterance aggregation."""
 
-    def __init__(self, model_size="tiny.en", compute_type="int8"):
+    def __init__(self, model_size="tiny.en", compute_type="int8", verbose=False):
         # Audio parameters
         self.target_sample_rate = 16000
         self.min_chunk_duration = 0.0
         self.max_chunk_duration = 8.0
         self.channels = 1
+        self.verbose = verbose
 
         # VAD Parameters
         self.silence_threshold = 200.0
