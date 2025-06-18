@@ -1,6 +1,6 @@
 # llm/conversation_manager.py
 """
-Ultra-Low Latency Streaming Conversation Manager for Opi Voice Assistant
+Low Latency Streaming Conversation Manager for Opi Voice Assistant
 with phrase-level streaming for dramatically reduced first audio latency
 """
 
@@ -24,31 +24,36 @@ except ImportError:
 
 
 class PhraseStreamer:
-    """Enhanced streamer that yields phrases for ultra-low latency TTS."""
+    """Enhanced streamer that yields natural phrases for ultra-low latency TTS."""
     
     def __init__(self):
         self.buffer = ""
+        self.word_count = 0  # Track words processed
         
-        # Phrase boundaries (more aggressive than sentences)
-        self.phrase_endings = re.compile(r'[.!?]+\s*|[,;]\s*|(?:\s+(?:and|or|but|so|then|however|also|therefore|meanwhile|furthermore)\s+)')
+        # Natural phrase boundaries (prioritized by naturalness)
+        self.strong_boundaries = re.compile(r'[.!?]+\s*')  # Sentence endings
+        self.medium_boundaries = re.compile(r'[,;:]\s+')   # Clause separators  
+        self.weak_boundaries = re.compile(r'(?:\s+(?:and|or|but|so|then|however|also|therefore|meanwhile|furthermore|moreover|additionally|consequently|thus|actually|basically|essentially|well|now|okay|alright)\s+)', re.IGNORECASE)
         
-        # Sentence endings for final cleanup
-        self.sentence_endings = re.compile(r'[.!?]+\s*')
+        # Conjunction/transition words that are good natural break points
+        self.natural_breaks = re.compile(r'\b(?:and|or|but|so|then|however|also|therefore|meanwhile|furthermore|moreover|additionally|consequently|thus|actually|basically|essentially|well|now|okay|alright)\b', re.IGNORECASE)
         
-        # Length thresholds
-        self.min_phrase_length = 4   # Much shorter than sentences
-        self.max_phrase_length = 40  # Prevent overly long phrases
-        self.min_sentence_length = 8 # For complete sentences
+        # Length thresholds - more conservative for first part
+        self.early_phrase_max_words = 8    # First few phrases shorter for speed
+        self.normal_phrase_max_words = 12  # Later phrases can be longer
+        self.min_phrase_words = 3          # Minimum meaningful phrase
+        self.speed_critical_word_limit = 15  # Be very aggressive only for first 15 words
         
-        # Timing for aggressive streaming
+        # Timing for aggressive streaming (only early on)
         self.last_chunk_time = time.time()
-        self.max_wait_time = 0.3  # Max 300ms before forcing output
+        self.max_wait_time_early = 0.2     # Very fast for first words
+        self.max_wait_time_normal = 0.4    # More patient later
         
-        # Common phrase starters that indicate good break points
-        self.natural_breaks = re.compile(r'\b(?:well|so|now|then|also|however|but|and|or|actually|basically|essentially|meanwhile|furthermore|additionally|moreover|therefore|thus|consequently)\b', re.IGNORECASE)
+        # Track if we're still in the speed-critical phase
+        self.in_speed_critical_phase = True
         
     def add_chunk(self, chunk: str) -> List[str]:
-        """Add chunk and return phrases immediately when possible."""
+        """Add chunk and return phrases with improved natural breaking."""
         if not chunk:
             return []
             
@@ -56,84 +61,149 @@ class PhraseStreamer:
         phrases = []
         current_time = time.time()
         
-        # Strategy 1: Look for natural phrase boundaries
-        phrase_matches = list(self.phrase_endings.finditer(self.buffer))
+        # Update speed-critical phase status
+        current_word_count = len(self.buffer.split())
+        if current_word_count > self.speed_critical_word_limit:
+            self.in_speed_critical_phase = False
         
-        for match in phrase_matches:
+        # Strategy 1: Look for strong natural boundaries (sentences)
+        strong_matches = list(self.strong_boundaries.finditer(self.buffer))
+        for match in strong_matches:
             end_pos = match.end()
             potential_phrase = self.buffer[:end_pos].strip()
+            word_count = len(potential_phrase.split())
             
-            # Yield if it's long enough and meaningful
-            if len(potential_phrase) >= self.min_phrase_length:
+            if word_count >= self.min_phrase_words:
                 phrases.append(potential_phrase)
                 self.buffer = self.buffer[end_pos:].lstrip()
+                self.word_count += word_count
                 self.last_chunk_time = current_time
+                continue
         
-        # Strategy 2: Aggressive timeout-based chunking
-        if not phrases and self.buffer.strip():
-            time_since_last = current_time - self.last_chunk_time
-            
-            if time_since_last > self.max_wait_time:
-                # Force output if we've waited too long
-                if len(self.buffer.strip()) >= self.min_phrase_length:
-                    # Try to break at natural points
-                    natural_break_pos = self._find_natural_break()
-                    if natural_break_pos > 0:
-                        phrase = self.buffer[:natural_break_pos].strip()
-                        phrases.append(phrase)
-                        self.buffer = self.buffer[natural_break_pos:].lstrip()
+        # Strategy 2: Look for medium boundaries (commas, colons, semicolons)
+        if not phrases:
+            medium_matches = list(self.medium_boundaries.finditer(self.buffer))
+            for match in medium_matches:
+                end_pos = match.end()
+                potential_phrase = self.buffer[:end_pos].strip()
+                word_count = len(potential_phrase.split())
+                
+                # Be more selective with comma breaks
+                if (word_count >= self.min_phrase_words and 
+                    word_count <= (self.early_phrase_max_words if self.in_speed_critical_phase else self.normal_phrase_max_words)):
+                    phrases.append(potential_phrase)
+                    self.buffer = self.buffer[end_pos:].lstrip()
+                    self.word_count += word_count
+                    self.last_chunk_time = current_time
+                    break
+        
+        # Strategy 3: Look for weak boundaries (conjunctions/transitions) - only if needed
+        if not phrases and self.in_speed_critical_phase:
+            weak_matches = list(self.weak_boundaries.finditer(self.buffer))
+            for match in weak_matches:
+                # Break before the conjuncton, not after
+                break_pos = match.start()
+                if break_pos > 0:
+                    potential_phrase = self.buffer[:break_pos].strip()
+                    word_count = len(potential_phrase.split())
+                    
+                    if word_count >= self.min_phrase_words:
+                        phrases.append(potential_phrase)
+                        self.buffer = self.buffer[break_pos:].lstrip()
+                        self.word_count += word_count
                         self.last_chunk_time = current_time
+                        break
         
-        # Strategy 3: Prevent overly long phrases
-        if not phrases and len(self.buffer.strip()) > self.max_phrase_length:
-            break_pos = self._find_natural_break() or self.max_phrase_length
-            phrase = self.buffer[:break_pos].strip()
-            if len(phrase) >= self.min_phrase_length:
-                phrases.append(phrase)
-                self.buffer = self.buffer[break_pos:].lstrip()
-                self.last_chunk_time = current_time
+        # Strategy 4: Length-based breaking (more conservative)
+        if not phrases:
+            current_words = self.buffer.split()
+            max_words = self.early_phrase_max_words if self.in_speed_critical_phase else self.normal_phrase_max_words
+            
+            if len(current_words) > max_words:
+                # Try to find a good break point within the max length
+                break_pos = self._find_best_break_point(current_words, max_words)
+                if break_pos > self.min_phrase_words:
+                    phrase_words = current_words[:break_pos]
+                    phrase = ' '.join(phrase_words)
+                    phrases.append(phrase)
+                    
+                    remaining_words = current_words[break_pos:]
+                    self.buffer = ' '.join(remaining_words)
+                    self.word_count += len(phrase_words)
+                    self.last_chunk_time = current_time
+        
+        # Strategy 5: Timeout-based chunking (only in speed-critical phase)
+        if not phrases and self.in_speed_critical_phase:
+            time_since_last = current_time - self.last_chunk_time
+            max_wait = self.max_wait_time_early if self.in_speed_critical_phase else self.max_wait_time_normal
+            
+            if time_since_last > max_wait:
+                current_words = self.buffer.split()
+                if len(current_words) >= self.min_phrase_words:
+                    # Find the best natural break point available
+                    break_pos = self._find_emergency_break_point(current_words)
+                    if break_pos >= self.min_phrase_words:
+                        phrase_words = current_words[:break_pos]
+                        phrase = ' '.join(phrase_words)
+                        phrases.append(phrase)
+                        
+                        remaining_words = current_words[break_pos:]
+                        self.buffer = ' '.join(remaining_words)
+                        self.word_count += len(phrase_words)
+                        self.last_chunk_time = current_time
         
         return phrases
     
-    def _find_natural_break(self) -> int:
-        """Find the best natural breaking point in current buffer."""
-        if not self.buffer:
-            return 0
+    def _find_best_break_point(self, words, max_words):
+        """Find the best natural break point within max_words limit."""
+        # Look for natural break words within the limit
+        for i in range(max_words - 1, self.min_phrase_words - 1, -1):
+            if i < len(words):
+                word = words[i].lower().strip('.,!?;:')
+                if word in ['and', 'or', 'but', 'so', 'then', 'however', 'also', 'therefore']:
+                    return i  # Break before the conjunction
+                elif i > 0 and words[i-1].rstrip('.,!?;:').lower() in ['well', 'now', 'okay', 'alright']:
+                    return i  # Break after transition words
         
-        # Look for natural break words
-        natural_matches = list(self.natural_breaks.finditer(self.buffer))
-        if natural_matches:
-            # Take the last natural break that's not too close to the end
-            for match in reversed(natural_matches):
-                if match.start() >= self.min_phrase_length:
-                    return match.start()
+        # Look for words that end with punctuation
+        for i in range(max_words - 1, self.min_phrase_words - 1, -1):
+            if i < len(words) and any(words[i].endswith(p) for p in '.,;:'):
+                return i + 1
         
-        # Fall back to word boundaries
-        words = self.buffer.split()
-        if len(words) >= 3:  # At least 3 words for a phrase
-            # Take about 2/3 of available words
-            break_word = min(len(words) - 1, max(2, len(words) * 2 // 3))
-            break_pos = len(' '.join(words[:break_word])) + 1
-            return break_pos
+        # Default to about 2/3 of max_words
+        return min(max_words * 2 // 3, len(words))
+    
+    def _find_emergency_break_point(self, words):
+        """Find an emergency break point when timeout forces a break."""
+        # Try to break at any natural word boundary
+        natural_break_words = {'and', 'or', 'but', 'so', 'then', 'well', 'now', 'also'}
         
-        return 0
+        # Look backwards from a reasonable point
+        max_emergency_length = min(len(words), 6)
+        for i in range(max_emergency_length, self.min_phrase_words - 1, -1):
+            if words[i-1].lower().strip('.,!?;:') in natural_break_words:
+                return i
+        
+        # If no natural break, just break at min length + 1
+        return min(self.min_phrase_words + 1, len(words))
     
     def flush(self) -> Optional[str]:
         """Return any remaining content as final phrase."""
-        if self.buffer.strip() and len(self.buffer.strip()) >= self.min_phrase_length:
-            final = self.buffer.strip()
-            self.buffer = ""
-            return final
+        if self.buffer.strip():
+            word_count = len(self.buffer.split())
+            if word_count >= 1:  # Even single words at the end are worth saying
+                final = self.buffer.strip()
+                self.buffer = ""
+                return final
         return None
 
-
 class UltraLowLatencyTTSPipeline:
-    """TTS pipeline optimized for phrase-level streaming."""
+    """TTS pipeline optimized for phrase-level streaming - FIXED VERSION."""
     
     def __init__(self, tts_worker, audio_worker):
         self.tts_worker = tts_worker
         self.audio_worker = audio_worker
-        self.phrase_queue = queue.Queue(maxsize=50)  # More capacity for phrases
+        self.phrase_queue = queue.Queue(maxsize=50)
         self.audio_queue = queue.Queue(maxsize=100)
         self.stop_event = threading.Event()
         self.first_audio_time = None
@@ -149,6 +219,11 @@ class UltraLowLatencyTTSPipeline:
         self.next_audio_sequence = 0
         self.sequence_lock = threading.Lock()
         
+        # CRITICAL FIX: Track pipeline completion state
+        self.tts_threads_finished = 0
+        self.tts_threads_total = 0
+        self.tts_finish_lock = threading.Lock()
+        
     def start_pipeline(self, debug=False):
         """Start the ultra-low latency pipeline."""
         self.stop_event.clear()
@@ -158,10 +233,12 @@ class UltraLowLatencyTTSPipeline:
         self.audio_sequence.clear()
         self.debug = debug
         
-        # Start multiple TTS threads for parallel processing
-        num_tts_threads = 2  # Process 2 phrases in parallel
+        # Reset completion tracking
+        self.tts_threads_finished = 0
+        self.tts_threads_total = 2  # We'll start 2 TTS threads
         
-        for i in range(num_tts_threads):
+        # Start multiple TTS threads for parallel processing
+        for i in range(self.tts_threads_total):
             tts_thread = threading.Thread(
                 target=self._tts_processing_loop,
                 name=f"UltraFastTTS-{i}",
@@ -202,22 +279,46 @@ class UltraLowLatencyTTSPipeline:
             cprint("[Pipeline] ⚠️ Phrase queue full, dropping phrase", "yellow")
     
     def finish_pipeline(self):
-        """Complete processing and cleanup."""
-        # Signal end of phrases to all TTS threads
-        for _ in range(len(self.processing_threads) - 1):  # All except audio thread
+        """Complete processing and cleanup - FIXED VERSION."""
+        if self.debug:
+            cprint("[Pipeline] 🏁 Starting pipeline shutdown...", "yellow")
+        
+        # Step 1: Signal end of phrases to all TTS threads
+        for i in range(self.tts_threads_total):
             self.phrase_queue.put(None)
+            if self.debug:
+                cprint(f"[Pipeline] Sent shutdown signal to TTS thread {i}", "cyan")
         
-        # Wait for processing to complete
-        for thread in self.processing_threads:
-            thread.join(timeout=8.0)
+        # Step 2: Wait for all TTS threads to complete phrase processing
+        tts_timeout = 10.0  # Give plenty of time for TTS processing
+        for thread in self.processing_threads[:-1]:  # All except audio thread
+            thread.join(timeout=tts_timeout)
+            if thread.is_alive():
+                cprint(f"[Pipeline] ⚠️ TTS thread {thread.name} didn't finish in time", "yellow")
         
-        if hasattr(self, 'debug') and self.debug:
+        # Step 3: Wait a bit more for any remaining audio to queue up
+        time.sleep(0.2)
+        
+        # Step 4: Now signal audio thread to finish (but only after TTS is done)
+        self.audio_queue.put(None)
+        if self.debug:
+            cprint("[Pipeline] Sent shutdown signa to audio thread", "cyan")
+        
+        # Step 5: Wait for audio thread to finish playing everything
+        audio_timeout = 8.0
+        audio_thread = self.processing_threads[-1]  # Last thread is audio
+        audio_thread.join(timeout=audio_timeout)
+        
+        if audio_thread.is_alive():
+            cprint("[Pipeline] ⚠️ Audio thread didn't finish in time", "yellow")
+        
+        if self.debug:
             cprint(f"[Pipeline] ✅ Processed {self.phrases_processed}/{self.total_phrases} phrases", "green")
         
         return self.first_audio_time
     
     def _tts_processing_loop(self):
-        """Ultra-fast TTS processing loop."""
+        """Ultra-fast TTS processing loop - FIXED VERSION."""
         thread_name = threading.current_thread().name
         debug = getattr(self, 'debug', False)
         
@@ -229,6 +330,8 @@ class UltraLowLatencyTTSPipeline:
                     continue
                 
                 if phrase_data is None:  # End signal
+                    if debug:
+                        cprint(f"[{thread_name}] Received shutdown signal", "yellow")
                     break
                 
                 phrase_text = phrase_data['text']
@@ -252,15 +355,35 @@ class UltraLowLatencyTTSPipeline:
         except Exception as e:
             cprint(f"[Pipeline] ❌ TTS processing error in {thread_name}: {e}", "red")
         finally:
-            # Signal end of audio processing
-            self.audio_queue.put(None)
+            # CRITICAL FIX: Track when TTS threads finish
+            with self.tts_finish_lock:
+                self.tts_threads_finished += 1
+                if debug:
+                    cprint(f"[{thread_name}] TTS thread finished ({self.tts_threads_finished}/{self.tts_threads_total})", "cyan")
+                
+                # Only signal audio end when ALL TTS threads are done
+                if self.tts_threads_finished >= self.tts_threads_total:
+                    if debug:
+                        cprint("[Pipeline] All TTS threads finished - checking for remaining audio", "green")
+                    
+                    # Queue any remaining audio that was processed
+                    with self.sequence_lock:
+                        self._check_and_queue_audio()
+                    
+                    # DON'T signal audio end here - let finish_pipeline() do it
+                    # This prevents the race condition!
     
     def _check_and_queue_audio(self):
         """Check if we have the next audio sequence ready and queue it."""
+        queued_count = 0
         while self.next_audio_sequence in self.audio_sequence:
             audio_data = self.audio_sequence.pop(self.next_audio_sequence)
             self.audio_queue.put(audio_data)
             self.next_audio_sequence += 1
+            queued_count += 1
+        
+        if queued_count > 0 and self.debug:
+            cprint(f"[Pipeline] Queued {queued_count} audio chunks", "green")
     
     def _synthesize_phrase(self, phrase: str):
         """Synthesize a phrase with optimizations for speed."""
@@ -272,8 +395,9 @@ class UltraLowLatencyTTSPipeline:
             return None
     
     def _audio_playback_loop(self):
-        """Audio playback loop with sequence management."""
+        """Audio playback loop with sequence management - FIXED VERSION."""
         debug = getattr(self, 'debug', False)
+        chunks_played = 0
         
         try:
             while not self.stop_event.is_set():
@@ -283,6 +407,8 @@ class UltraLowLatencyTTSPipeline:
                     continue
                 
                 if audio_chunk is None:  # End signal
+                    if debug:
+                        cprint(f"[Pipeline] Audio thread received end signal after playing {chunks_played} chunks", "yellow")
                     break
                 
                 # Mark first audio time
@@ -301,10 +427,16 @@ class UltraLowLatencyTTSPipeline:
                 timings = {}
                 
                 self.audio_worker.process_playback(temp_queue, temp_stop, timings)
+                chunks_played += 1
+                
+                if debug:
+                    cprint(f"[Pipeline] 🔊 Played audio chunk {chunks_played}", "blue")
                 
         except Exception as e:
             cprint(f"[Pipeline] ❌ Audio playback error: {e}", "red")
-
+        finally:
+            if debug:
+                cprint(f"[Pipeline] Audio thread finished after playing {chunks_played} chunks", "green")
 
 class ConversationManager:
     """Enhanced conversation manager with ultra-low latency phrase streaming - DROP-IN REPLACEMENT."""
@@ -463,34 +595,6 @@ Response Guidelines for Ultra-Low Latency Voice:
             pipeline.finish_pipeline()
             raise
     
-    # LEGACY METHOD - kept for backward compatibility
-    async def process_user_input(self, user_text: str, speech_end_time: float) -> AsyncGenerator[str, None]:
-        """Legacy method - kept for backward compatibility."""
-        
-        # Add user message to history
-        self._add_to_history("user", user_text)
-        
-        # Try Gemini first
-        if self.model:
-            try:
-                full_response = ""
-                async for chunk in self._stream_llm_response(user_text):
-                    full_response += chunk
-                    yield chunk
-                
-                # Add complete response to history
-                if full_response:
-                    self._add_to_history("assistant", full_response)
-                
-                return
-                
-            except Exception as e:
-                print(f"[LLM] Streaming error: {e}")
-        
-        # Fallback to non-streaming response
-        async for chunk in self._get_fallback_response(user_text):
-            yield chunk
-    
     async def _stream_llm_response(self, user_text: str) -> AsyncGenerator[str, None]:
         """Stream response from LLM with optimized chunking for phrases."""
         
@@ -509,6 +613,14 @@ Current user input: {user_text}
 
 Respond as Opi, the helpful voice assistant. Use short, natural phrases that can be spoken immediately. Be concise and conversational."""
         
+        print("\n" + "="*80)
+        print("🔍 FULL GEMINI API REQUEST:")
+        print("="*80)
+        print("SYSTEM PROMPT:")
+        print(self._get_enhanced_system_prompt())
+        print("\nUSER PROMPT:")
+        print(prompt)
+        print("="*80 + "\n")
         try:
             # Try streaming API first
             if hasattr(self.model, 'generate_content') and hasattr(genai, 'GenerationConfig'):
