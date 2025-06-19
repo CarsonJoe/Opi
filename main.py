@@ -113,7 +113,7 @@ class OpiVoiceAssistant:
         
     async def _init_llm_components(self):
         """Initialize LLM and MCP components."""
-        cprint("[Opi] Iitializing LLM components...", "yellow")
+        cprint("[Opi] Initializing LLM components...", "yellow")
         
         # Validate LLM configuration
         if not self.config.llm.api_key:
@@ -124,10 +124,12 @@ class OpiVoiceAssistant:
             if self.verbose:
                 cprint(f"[Opi] LLM API key configured: {self.config.llm.api_key[:10]}...", "green")
         
-        # MCP manager for tool integration
-        self.mcp_manager = MCPManager(
-            server_configs=self.config.mcp.servers,
-            force_refresh=False
+        # Enhanced MCP manager with proper host implementation
+        from llm.mcp_manager import create_mcp_manager
+        
+        self.mcp_manager = create_mcp_manager(
+            config_dict=self.config.mcp.servers,
+            verbose=self.verbose
         )
         await self.mcp_manager.initialize()
         
@@ -141,8 +143,13 @@ class OpiVoiceAssistant:
         await self.conversation_manager.initialize()
         
         tool_count = len(self.mcp_manager.get_tools())
-        cprint(f"[Opi] ✅ LLM ready with {tool_count} MCP tools", "green")
+        server_status = self.mcp_manager.get_server_status()
+        connected_servers = server_status['connected_servers']
+        total_servers = server_status['total_servers']
         
+        cprint(f"[Opi] ✅ LLM ready with {connected_servers}/{total_servers} MCP servers", "green")
+        cprint(f"[Opi] 🛠️ Available tools: {tool_count}", "green")
+
     async def _test_streaming_processing(self):
         """Test streaming processing functionality (verbose mode only)."""
         cprint("[Opi] Testing streaming pipeline...", "yellow")
