@@ -43,7 +43,7 @@ class SpeechWorker:
         self.min_speech_ratio = 0.1
 
         # Initialize model
-        self.model = WhisperModel(model_size, compute_type=compute_type)
+        self.model = WhisperModel(model_size, compute_type=compute_type, device="cpu")
         print(f"[Speech] ✅ Whisper model loaded: {model_size}")
 
         self.audio_queue = queue.Queue()
