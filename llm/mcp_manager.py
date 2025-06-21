@@ -1,15 +1,21 @@
 # llm/mcp_manager.py
 """
-Enhanced MCP Manager with full tool calling support
-Implements complete MCP protocol for tool discovery and execution
+Enhanced MCP Manager with FastMCP 2.x support
+Compatible with the latest MCP ecosystem (2024-2025)
 """
 
-from fastmcp import Client
 import asyncio
 import json
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass
 from termcolor import cprint
+
+try:
+    from fastmcp import Client
+    FASTMCP_AVAILABLE = True
+except ImportError:
+    FASTMCP_AVAILABLE = False
+    print("[MCP] ⚠️  FastMCP not available. Install with: pip install fastmcp")
 
 
 @dataclass
@@ -66,101 +72,185 @@ class ToolCallResult:
         """Extract text content from the result."""
         text_parts = []
         for item in self.content:
-            if item.get("type") == "text":
-                text_parts.append(item.get("text", ""))
+            if isinstance(item, dict):
+                if item.get("type") == "text":
+                    text_parts.append(item.get("text", ""))
+                elif "text" in item:
+                    text_parts.append(str(item["text"]))
+            elif isinstance(item, str):
+                text_parts.append(item)
+            else:
+                text_parts.append(str(item))
         return "\n".join(text_parts)
 
 
 class MCPManager:
-    """Enhanced MCP Manager with full tool calling support."""
+    """Enhanced MCP Manager with FastMCP 2.x support."""
     
     def __init__(self, config):
         self.config = config
-        self.clients = {}
+        self.client: Optional[Client] = None
         self.tools = []
         self.tool_to_server = {}  # Maps tool names to server names
         self.failed = []
         self.verbose = False
-
-    @property
-    def connected_servers(self):
-        return list(self.clients.keys())
+        self.connected_servers = []
 
     async def connect_all(self, verbose=False):
-        """Connect to all configured MCP servers."""
+        """Connect to all configured MCP servers using FastMCP 2.x."""
         self.verbose = verbose
-        servers = self.config or {}
-        self.failed = []
+        
+        if not FASTMCP_AVAILABLE:
+            cprint("[MCP] ❌ FastMCP not available. Cannot connect to servers.", "red")
+            return
+            
+        if not self.config:
+            cprint("[MCP] ⚠️  No MCP servers configured", "yellow")
+            return
 
-        for name, server_cfg in servers.items():
+        # Convert your config format to FastMCP client config
+        fastmcp_config = self._convert_config_to_fastmcp_format()
+        
+        if not fastmcp_config.get("mcpServers"):
+            cprint("[MCP] ⚠️  No valid MCP servers in config", "yellow")
+            return
+
+        try:
+            if verbose:
+                cprint(f"[MCP] Connecting to {len(fastmcp_config['mcpServers'])} MCP servers...", "yellow")
+                cprint(f"[MCP] Config: {json.dumps(fastmcp_config, indent=2)}", "cyan")
+            
+            # Create FastMCP client with multi-server config
+            self.client = Client(fastmcp_config)
+            
+            # Connect to all servers
+            await self.client.__aenter__()
+            
+            # Fetch tools from all connected servers
+            await self._fetch_all_tools()
+            
+            self.connected_servers = list(fastmcp_config["mcpServers"].keys())
+            
+            cprint(f"[MCP] ✅ Connected to {len(self.connected_servers)} MCP servers", "green")
+            if verbose:
+                cprint(f"[MCP] 📋 Total tools available: {len(self.tools)}", "green")
+                for tool in self.tools:
+                    cprint(f"[MCP]   - {tool.name} (from {tool.server_name})", "cyan")
+
+        except Exception as e:
+            cprint(f"[MCP] ❌ Failed to connect to MCP servers: {e}", "red")
+            if verbose:
+                import traceback
+                traceback.print_exc()
+            self.failed = list(self.config.keys()) if self.config else []
+
+    def _convert_config_to_fastmcp_format(self) -> Dict[str, Any]:
+        """Convert your config format to FastMCP client config format."""
+        fastmcp_config = {"mcpServers": {}}
+        
+        for server_name, server_cfg in self.config.items():
             if not server_cfg.get("enabled", True):
                 continue
-            url = server_cfg.get("url")
-            if not url:
-                print(f"[WARN] Skipping MCP server '{name}': no URL")
-                continue
-
-            try:
-                if verbose:
-                    print(f"[MCP] Connecting to server '{name}' at {url}")
                 
-                client = Client(url)
-                await client.__aenter__()
-                self.clients[name] = client
-
-                # Fetch complete tool information
-                await self._fetch_tools_from_server(name, client)
-
-            except Exception as e:
-                print(f"[ERROR] ❌ Failed to connect to MCP server '{name}': {e}")
-                self.failed.append(name)
-
-        print(f"[MCP] ✅ Connected to {len(self.clients)} MCP servers")
-        if verbose:
-            print(f"[MCP] 📋 Total tools available: {len(self.tools)}")
-            for tool in self.tools:
-                print(f"[MCP]   - {tool.name} (from {tool.server_name})")
-
-    async def _fetch_tools_from_server(self, server_name: str, client: Client):
-        """Fetch complete tool information from a server."""
-        try:
-            # Get tools list with full schema information
-            tools_response = await client.list_tools()
+            server_config = {}
             
+            # Handle HTTP/HTTPS URLs
+            if "url" in server_cfg:
+                url = server_cfg["url"]
+                server_config["url"] = url
+                
+                # Determine transport type
+                if url.startswith("http://") or url.startswith("https://"):
+                    server_config["transport"] = "streamable-http"
+                else:
+                    cprint(f"[MCP] ⚠️  Unknown URL format for server '{server_name}': {url}", "yellow")
+                    continue
+            
+            # Handle command-based servers (stdio)
+            elif "command" in server_cfg:
+                server_config["command"] = server_cfg["command"]
+                server_config["args"] = server_cfg.get("args", [])
+                if "env" in server_cfg:
+                    server_config["env"] = server_cfg["env"]
+            
+            # Handle script paths
+            elif "script" in server_cfg:
+                script_path = server_cfg["script"]
+                if script_path.endswith(".py"):
+                    server_config["command"] = "python"
+                    server_config["args"] = [script_path]
+                elif script_path.endswith(".js"):
+                    server_config["command"] = "node"
+                    server_config["args"] = [script_path]
+                else:
+                    cprint(f"[MCP] ⚠️  Unknown script type for server '{server_name}': {script_path}", "yellow")
+                    continue
+            
+            else:
+                cprint(f"[MCP] ⚠️  Invalid server config for '{server_name}': missing url, command, or script", "yellow")
+                continue
+            
+            fastmcp_config["mcpServers"][server_name] = server_config
+        
+        return fastmcp_config
+
+    async def _fetch_all_tools(self):
+        """Fetch tools from all connected servers."""
+        if not self.client:
+            return
+            
+        try:
+            # Get tools from the client
+            # Note: FastMCP 2.x client handles multi-server tool fetching automatically
+            tools_response = await self.client.list_tools()
+            
+            self.tools = []
+            self.tool_to_server = {}
+            
+            # FastMCP 2.x returns tools with server prefixes for multi-server setups
             for tool_data in tools_response:
                 # Handle both dict and object formats
-                if isinstance(tool_data, dict):
-                    name = tool_data.get("name")
-                    description = tool_data.get("description", "")
-                    input_schema = tool_data.get("inputSchema", {})
-                    annotations = tool_data.get("annotations")
+                if hasattr(tool_data, 'name'):
+                    # Object format
+                    name = tool_data.name
+                    description = getattr(tool_data, 'description', '')
+                    input_schema = getattr(tool_data, 'inputSchema', {})
+                    
+                    # Extract server name from tool name prefix (if present)
+                    server_name = "unknown"
+                    if "_" in name:
+                        potential_server = name.split("_")[0]
+                        if potential_server in self.connected_servers:
+                            server_name = potential_server
+                    
+                elif isinstance(tool_data, dict):
+                    # Dict format
+                    name = tool_data.get('name')
+                    description = tool_data.get('description', '')
+                    input_schema = tool_data.get('inputSchema', {})
+                    server_name = tool_data.get('server', 'unknown')
                 else:
-                    # Handle object format
-                    name = getattr(tool_data, "name", None)
-                    description = getattr(tool_data, "description", "")
-                    input_schema = getattr(tool_data, "inputSchema", {})
-                    annotations = getattr(tool_data, "annotations", None)
+                    continue
                 
                 if name:
                     mcp_tool = MCPTool(
                         name=name,
                         description=description,
                         input_schema=input_schema,
-                        server_name=server_name,
-                        annotations=annotations
+                        server_name=server_name
                     )
                     
                     self.tools.append(mcp_tool)
                     self.tool_to_server[name] = server_name
                     
                     if self.verbose:
-                        print(f"[MCP] ✅ Registered tool: {name}")
-                        print(f"[MCP]   Description: {description}")
-                        if input_schema.get("properties"):
-                            print(f"[MCP]   Parameters: {list(input_schema['properties'].keys())}")
+                        cprint(f"[MCP] ✅ Registered tool: {name}", "green")
                 
         except Exception as e:
-            print(f"[MCP] ❌ Error fetching tools from server '{server_name}': {e}")
+            cprint(f"[MCP] ❌ Error fetching tools: {e}", "red")
+            if self.verbose:
+                import traceback
+                traceback.print_exc()
 
     def get_tools(self) -> List[MCPTool]:
         """Get all available MCP tools with complete schema information."""
@@ -189,68 +279,78 @@ class MCPManager:
         return [tool.to_gemini_function() for tool in self.tools]
 
     async def call_tool(self, tool_name: str, arguments: Dict[str, Any]) -> ToolCallResult:
-        """Execute a tool call via MCP protocol."""
+        """Execute a tool call via MCP protocol using FastMCP 2.x client."""
+        if not self.client:
+            return ToolCallResult(
+                success=False,
+                content=[{"type": "text", "text": "MCP client not connected"}],
+                error_message="MCP client not available"
+            )
+        
         try:
-            # Find the server for this tool
-            server_name = self.tool_to_server.get(tool_name)
-            if not server_name:
+            # Validate tool exists
+            tool = self.get_tool_by_name(tool_name)
+            if not tool:
                 return ToolCallResult(
                     success=False,
                     content=[{"type": "text", "text": f"Tool '{tool_name}' not found"}],
                     error_message=f"Unknown tool: {tool_name}"
                 )
             
-            client = self.clients.get(server_name)
-            if not client:
+            # Validate arguments against tool schema
+            validation_error = self._validate_arguments(tool, arguments)
+            if validation_error:
                 return ToolCallResult(
                     success=False,
-                    content=[{"type": "text", "text": f"Server '{server_name}' not connected"}],
-                    error_message=f"Server not available: {server_name}"
+                    content=[{"type": "text", "text": f"Invalid arguments: {validation_error}"}],
+                    error_message=validation_error
                 )
             
-            # Validate arguments against tool schema
-            tool = self.get_tool_by_name(tool_name)
-            if tool:
-                validation_error = self._validate_arguments(tool, arguments)
-                if validation_error:
-                    return ToolCallResult(
-                        success=False,
-                        content=[{"type": "text", "text": f"Invalid arguments: {validation_error}"}],
-                        error_message=validation_error
-                    )
-            
             if self.verbose:
-                print(f"[MCP] 🔧 Calling tool '{tool_name}' with args: {arguments}")
+                cprint(f"[MCP] 🔧 Calling tool '{tool_name}' with args: {arguments}", "cyan")
             
-            # Make the actual tool call via MCP client
-            result = await client.call_tool(tool_name, arguments)
+            # Make the actual tool call via FastMCP client
+            result = await self.client.call_tool(tool_name, arguments)
             
-            # Handle the response
-            if hasattr(result, 'content'):
-                content = result.content
-            elif isinstance(result, dict) and 'content' in result:
-                content = result['content']
+            # Handle FastMCP 2.x response format
+            if isinstance(result, str):
+                # Simple string response
+                content = [{"type": "text", "text": result}]
+                success = True
+            elif isinstance(result, dict):
+                # Dict response
+                if "error" in result:
+                    content = [{"type": "text", "text": result.get("error", "Unknown error")}]
+                    success = False
+                else:
+                    content = [{"type": "text", "text": str(result)}]
+                    success = True
+            elif isinstance(result, list):
+                # List of content items
+                content = result
+                success = True
             else:
-                # Fallback for unexpected response format
+                # Other format, convert to string
                 content = [{"type": "text", "text": str(result)}]
-            
-            # Check if it's an error result
-            is_error = getattr(result, 'isError', False) or (isinstance(result, dict) and result.get('isError', False))
+                success = True
             
             if self.verbose:
-                print(f"[MCP] ✅ Tool call completed. Error: {is_error}")
-                print(f"[MCP] 📄 Result content: {content}")
+                cprint(f"[MCP] ✅ Tool call completed. Success: {success}", "green")
+                cprint(f"[MCP] 📄 Result: {content}", "white")
             
             return ToolCallResult(
-                success=not is_error,
-                content=content if isinstance(content, list) else [content],
-                error_message=None if not is_error else "Tool execution failed",
-                metadata=getattr(result, 'metadata', None) if hasattr(result, 'metadata') else None
+                success=success,
+                content=content,
+                error_message=None if success else "Tool execution failed"
             )
             
         except Exception as e:
             error_msg = f"Tool call failed: {str(e)}"
-            print(f"[MCP] ❌ {error_msg}")
+            cprint(f"[MCP] ❌ {error_msg}", "red")
+            if self.verbose:
+                import traceback
+                traceback.print_exc()
+            
             return ToolCallResult(
                 success=False,
                 content=[{"type": "text", "text": error_msg}],
@@ -298,7 +398,7 @@ class MCPManager:
     def get_server_status(self):
         """Get status information about connected servers."""
         return {
-            "connected_servers": len(self.clients),
+            "connected_servers": len(self.connected_servers),
             "total_servers": len(self.config) if self.config else 0,
             "failed_servers": self.failed,
             "available_tools": len(self.tools),
@@ -308,16 +408,28 @@ class MCPManager:
             }
         }
 
+    async def list_tools(self):
+        """List all available tools - convenience method for debugging."""
+        if not self.client:
+            return []
+        
+        try:
+            return await self.client.list_tools()
+        except Exception as e:
+            cprint(f"[MCP] Error listing tools: {e}", "red")
+            return []
+
     async def close(self):
         """Close all MCP client connections."""
-        for name, client in self.clients.items():
+        if self.client:
             try:
-                await client.__aexit__(None, None, None)
-                print(f"[MCP] 🔌 Closed MCP client: {name}")
+                await self.client.__aexit__(None, None, None)
+                cprint("[MCP] 🔌 Closed MCP client", "green")
             except Exception as e:
-                print(f"[WARN] Failed to close MCP client '{name}': {e}")
+                cprint(f"[MCP] ⚠️  Error closing MCP client: {e}", "yellow")
         
-        self.clients = {}
+        self.client = None
         self.tools = []
         self.tool_to_server = {}
-        print("[MCP] ✅ All MCP clients closed")
+        self.connected_servers = []
+        cprint("[MCP] ✅ MCP manager closed", "green")

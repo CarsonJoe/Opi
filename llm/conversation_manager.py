@@ -1,6 +1,6 @@
 # llm/conversation_manager.py
 """
-Conversation Manager 4.4 – provider‑agnostic (Gemini, Claude, GPT‑4o)
+Conversation Manager 4.5 – FIXED tool calling with proper error handling
 --------------------------------------------------------------------
 Edit `config.json → llm.provider` to switch backend:
   • google-genai   – Gemini      (env GOOGLE_API_KEY)
@@ -38,7 +38,7 @@ except ImportError:
 
 from langchain_core.tools import StructuredTool
 from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain.agents import AgentExecutor, create_structured_chat_agent
+from langchain.agents import AgentExecutor, create_tool_calling_agent
 
 ENV_KEY = {
     "google-genai": "GOOGLE_API_KEY",
@@ -59,50 +59,182 @@ class ToolAwareAgent:
         if provider == "google-genai":
             self.llm = llm_cls(model=model, temperature=temp, google_api_key=api_key)
         elif provider == "anthropic":
-            # ChatAnthropic uses model_name param like ChatOpenAI
-            self.llm = llm_cls(model_name=model, temperature=temp, anthropic_api_key=api_key)
+            # ChatAnthropic uses model param for newer versions
+            self.llm = llm_cls(model=model, temperature=temp, anthropic_api_key=api_key)
         else:
             self.llm = llm_cls(model_name=model, temperature=temp, openai_api_key=api_key)
 
         self.agent = self._build_agent()
 
     def _wrap_tool(self, tool) -> StructuredTool:
-        async def _run(**kwargs):
-            res: ToolCallResult = await self.mcp.call_tool(tool.name, kwargs)
-            return res.get_text_content() if res.success else f"[TOOL ERROR] {res.error_message}"
-        sig = [inspect.Parameter(n, inspect.Parameter.POSITIONAL_OR_KEYWORD)
-               for n in tool.input_schema.get("properties", {})]
-        _run.__signature__ = inspect.signature(lambda **_: None).replace(parameters=sig)
+        def _run(**kwargs):  # REMOVE async - LangChain expects sync function
+            if self.verbose:
+                cprint(f"[Agent] 🔧 Calling MCP tool: {tool.name} with {kwargs}", "cyan")
+            
+            # Clean kwargs - remove any LangChain-specific parameters
+            clean_kwargs = {k: v for k, v in kwargs.items() if k not in ['config', 'configurable']}
+            
+            # Use asyncio.run to handle the async call in sync context
+            loop = None
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    # If we're in an async context, create a new thread
+                    import concurrent.futures
+                    with concurrent.futures.ThreadPoolExecutor() as executor:
+                        future = executor.submit(asyncio.run, self.mcp.call_tool(tool.name, clean_kwargs))
+                        res = future.result()
+                else:
+                    res = asyncio.run(self.mcp.call_tool(tool.name, clean_kwargs))
+            except RuntimeError:
+                # Fallback for nested event loops
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor() as executor:
+                    future = executor.submit(asyncio.run, self.mcp.call_tool(tool.name, clean_kwargs))
+                    res = future.result()
+            
+            if self.verbose:
+                cprint(f"[Agent] 📄 Tool result: success={res.success}", "cyan")
+                cprint(f"[Agent] 📄 Content: {res.get_text_content()[:200]}...", "white")
+            
+            if res.success:
+                return res.get_text_content()
+            else:
+                return f"[TOOL ERROR] {res.error_message or 'Unknown error'}"
+        
+        # Create proper parameter signature for Gemini compatibility
+        sig_params = []
+        properties = tool.input_schema.get("properties", {})
+        required = tool.input_schema.get("required", [])
+        
+        # If no properties, create a simple function
+        if not properties:
+            sig_params = []
+        else:
+            for param_name, param_info in properties.items():
+                param_type = param_info.get("type", "string")
+                # Convert JSON schema types to Python types
+                python_type = {
+                    "string": str,
+                    "integer": int,
+                    "number": float,
+                    "boolean": bool,
+                    "array": list,
+                    "object": dict
+                }.get(param_type, str)
+                
+                default = inspect.Parameter.empty if param_name in required else None
+                sig_params.append(
+                    inspect.Parameter(
+                        param_name, 
+                        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                        default=default,
+                        annotation=python_type
+                    )
+                )
+        
+        _run.__signature__ = inspect.Signature(sig_params)
+        
+        # Create a clean schema for LangChain/Gemini
+        clean_schema = {}
+        if properties:
+            clean_schema = {
+                "type": "object",
+                "properties": {},
+                "required": required
+            }
+            
+            for prop_name, prop_info in properties.items():
+                clean_prop = {"type": prop_info.get("type", "string")}
+                if "description" in prop_info:
+                    clean_prop["description"] = prop_info["description"]
+                # Handle array types properly for Gemini
+                if prop_info.get("type") == "array" and "items" in prop_info:
+                    clean_prop["items"] = prop_info["items"]
+                clean_schema["properties"][prop_name] = clean_prop
+        
         return StructuredTool.from_function(
             _run,
             name=tool.name,
             description=tool.description,
-            infer_schema=False,
+            args_schema=None if not clean_schema else None,  # Let LangChain infer from signature
         )
 
     def _build_agent(self):
         tools = [self._wrap_tool(t) for t in self.mcp.get_tools()]
+        
+        # Use create_tool_calling_agent for better Anthropic support
         prompt = ChatPromptTemplate.from_messages([
             ("system",
              "You are Opi, an on‑device assistant running on an Orange Pi. "
-             "Call a tool whenever it can answer better.\n\n"
-             "Tools: {tool_names}\n\nSpecs:\n{tools}"),
+             "You have access to tools that can provide better information or perform actions. "
+             "ALWAYS use tools when they can answer the user's question better than your knowledge. "
+             "For example, if someone asks for a secret message, use the get_secret_message tool. "
+             "If someone asks how many secrets you know, use the count_secrets tool. "
+             "Be concise but helpful in your responses."),
             MessagesPlaceholder("chat_history"),
             ("user", "{input}"),
             MessagesPlaceholder("agent_scratchpad"),
         ])
+        
         if self.verbose:
-            cprint("\n=== TOOL PROMPT ===", "cyan", attrs=["bold"])
+            cprint("\n=== UPDATED TOOL PROMPT ===", "cyan", attrs=["bold"])
             cprint(str(prompt), "cyan")
+            cprint(f"Available tools: {len(tools)}", "yellow")
             for t in tools:
-                cprint(f" • {t.name}", "yellow")
-            cprint("===================\n", "cyan", attrs=["bold"])
-        chain = create_structured_chat_agent(self.llm, tools, prompt)
-        return AgentExecutor(agent=chain, tools=tools, verbose=self.verbose)
+                cprint(f" • {t.name}: {t.description}", "yellow")
+            cprint("===========================\n", "cyan", attrs=["bold"])
+        
+        # Use create_tool_calling_agent instead of create_structured_chat_agent
+        agent = create_tool_calling_agent(self.llm, tools, prompt)
+        return AgentExecutor(
+            agent=agent, 
+            tools=tools, 
+            verbose=self.verbose,
+            max_iterations=3,  # Limit iterations to prevent loops
+            early_stopping_method="generate"  # Stop early if no more tools needed
+        )
 
     async def run(self, text: str) -> str:
-        out = await self.agent.ainvoke({"input": text})
-        return out["output"].strip()
+        try:
+            if self.verbose:
+                cprint(f"[Agent] 🎯 Processing: '{text}'", "cyan")
+            
+            out = await self.agent.ainvoke({
+                "input": text,
+                "chat_history": []  # Add proper chat history if needed
+            })
+            
+            # Handle both string and list outputs from agent
+            if isinstance(out, dict):
+                result = out.get("output", "")
+            else:
+                result = out
+            
+            # If result is a list (like from Anthropic), extract text content
+            if isinstance(result, list):
+                text_parts = []
+                for item in result:
+                    if isinstance(item, dict) and item.get("type") == "text":
+                        text_parts.append(item.get("text", ""))
+                    elif isinstance(item, str):
+                        text_parts.append(item)
+                result = " ".join(text_parts)
+            
+            # Now ensure it's a string
+            result = str(result).strip()
+            
+            if self.verbose:
+                cprint(f"[Agent] ✅ Result: '{result}'", "green")
+            
+            return result
+            
+        except Exception as e:
+            if self.verbose:
+                cprint(f"[Agent] ❌ Error: {e}", "red")
+                import traceback
+                traceback.print_exc()
+            raise e
 
 # ─── ConversationManager ────────────────────────────────────────────────────
 class ConversationManager:
@@ -127,10 +259,12 @@ class ConversationManager:
         # Agent (tool‑aware) --------------------------------------------------
         if key and prov in LLM_WRAPPERS:
             try:
-                self.agent = ToolAwareAgent(prov, self.mcp, model, temp, key)
+                self.agent = ToolAwareAgent(prov, self.mcp, model, temp, key, verbose=True)
                 cprint(f"[LLM] ✅ {prov} agent ready", "green")
             except Exception as e:
                 cprint(f"[LLM] ⚠️  agent init failed: {e}", "yellow")
+                import traceback
+                traceback.print_exc()
 
         # Fast model (no tools) ---------------------------------------------
         try:
@@ -158,16 +292,33 @@ class ConversationManager:
     async def process_user_input_streaming(self, text: str, *_,
                                            tts_worker=None, audio_worker=None,
                                            debug=False):
+        # ALWAYS try the agent first if available
         if self.agent:
-            print(await mcp_manager.list_tools())
-
             try:
-                reply = await self.agent.run(text)
-                if reply:
-                    return await self._speak(reply, tts_worker, audio_worker)
-            except Exception as e:
                 if debug:
-                    cprint(f"[LLM] agent error: {e}", "yellow")
+                    cprint(f"[LLM] 🎯 Using agent for: '{text}'", "cyan")
+                
+                reply = await self.agent.run(text)
+                
+                if reply and reply.strip():
+                    if debug:
+                        cprint(f"[LLM] ✅ Agent replied: '{reply[:100]}...'", "green")
+                    return await self._speak(reply, tts_worker, audio_worker)
+                else:
+                    if debug:
+                        cprint("[LLM] ⚠️  Agent returned empty response", "yellow")
+                    
+            except Exception as e:
+                cprint(f"[LLM] ❌ Agent error: {e}", "red")
+                if debug:
+                    import traceback
+                    traceback.print_exc()
+                # Don't fall back to fast stream, try to fix the issue
+                return await self._speak("Sorry, I encountered an error with my tools. Let me try a different approach.", tts_worker, audio_worker)
+        
+        # Only use fast stream if no agent available
+        if debug:
+            cprint("[LLM] 🚀 Using fast stream (no agent available)", "yellow")
         return await self._fast_stream(text, tts_worker, audio_worker)
 
     # ── Fast path (provider‑specific) ───────────────────────────────────────
@@ -207,6 +358,23 @@ class ConversationManager:
 
     # ── Text‑only generator (CLI) ───────────────────────────────────────────
     async def _stream_llm_response(self, text: str):
+        # Always try agent first if available
+        if self.agent:
+            try:
+                reply = await self.agent.run(text)
+                if reply and reply.strip():
+                    self._add_history("assistant", reply)
+                    # Yield response in chunks for text-only mode
+                    for sent in re.split(r"(?<=[.!?])\s+", reply):
+                        if sent:
+                            yield sent + " "
+                            await asyncio.sleep(0)
+                    return
+            except Exception as e:
+                cprint(f"[LLM] Agent error in text mode: {e}", "red")
+                yield f"(Agent error: {e}) "
+        
+        # Fallback to fast LLM
         if not self.fast_llm:
             yield "(LLM unavailable)"; return
 
@@ -262,4 +430,3 @@ class ConversationManager:
 
     async def close(self):
         cprint("[LLM] Conversation manager closed", "green")
-
