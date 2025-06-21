@@ -1,7 +1,7 @@
 # llm/mcp_manager.py
 """
-Enhanced MCP Manager with FastMCP 2.x support
-Compatible with the latest MCP ecosystem (2024-2025)
+Simplified MCP Manager with FastMCP 2.x support and persistent connections
+Optimized for speed and reliability
 """
 
 import asyncio
@@ -80,24 +80,29 @@ class ToolCallResult:
             elif isinstance(item, str):
                 text_parts.append(item)
             else:
-                text_parts.append(str(item))
+                # Handle FastMCP result objects
+                if hasattr(item, 'text'):
+                    text_parts.append(str(item.text))
+                else:
+                    text_parts.append(str(item))
         return "\n".join(text_parts)
 
 
 class MCPManager:
-    """Enhanced MCP Manager with FastMCP 2.x support."""
+    """Simplified MCP Manager optimized for speed with persistent connections."""
     
     def __init__(self, config):
         self.config = config
         self.client: Optional[Client] = None
         self.tools = []
-        self.tool_to_server = {}  # Maps tool names to server names
+        self.tool_to_server = {}
         self.failed = []
         self.verbose = False
         self.connected_servers = []
+        self._client_lock = asyncio.Lock()
 
     async def connect_all(self, verbose=False):
-        """Connect to all configured MCP servers using FastMCP 2.x."""
+        """Connect to MCP servers with simplified, fast connection logic."""
         self.verbose = verbose
         
         if not FASTMCP_AVAILABLE:
@@ -108,34 +113,40 @@ class MCPManager:
             cprint("[MCP] ⚠️  No MCP servers configured", "yellow")
             return
 
-        # Convert your config format to FastMCP client config
-        fastmcp_config = self._convert_config_to_fastmcp_format()
-        
-        if not fastmcp_config.get("mcpServers"):
-            cprint("[MCP] ⚠️  No valid MCP servers in config", "yellow")
-            return
-
         try:
+            # Find the first HTTP server (simplified approach)
+            server_config = None
+            server_name = None
+            
+            for name, cfg in self.config.items():
+                if cfg.get("enabled", True) and "url" in cfg:
+                    server_config = cfg
+                    server_name = name
+                    break
+            
+            if not server_config:
+                cprint("[MCP] ❌ No HTTP server found in configuration", "red")
+                return
+            
+            url = server_config["url"]
+            
             if verbose:
-                cprint(f"[MCP] Connecting to {len(fastmcp_config['mcpServers'])} MCP servers...", "yellow")
-                cprint(f"[MCP] Config: {json.dumps(fastmcp_config, indent=2)}", "cyan")
+                cprint(f"[MCP] Connecting to {server_name}: {url}", "yellow")
             
-            # Create FastMCP client with multi-server config
-            self.client = Client(fastmcp_config)
-            
-            # Connect to all servers
+            # Create and connect FastMCP client directly
+            self.client = Client(url)
             await self.client.__aenter__()
             
-            # Fetch tools from all connected servers
-            await self._fetch_all_tools()
+            # Fetch tools
+            await self._fetch_tools_simple(server_name)
             
-            self.connected_servers = list(fastmcp_config["mcpServers"].keys())
+            self.connected_servers = [server_name]
             
-            cprint(f"[MCP] ✅ Connected to {len(self.connected_servers)} MCP servers", "green")
+            cprint(f"[MCP] ✅ Connected to 1 MCP server", "green")
             if verbose:
                 cprint(f"[MCP] 📋 Total tools available: {len(self.tools)}", "green")
                 for tool in self.tools:
-                    cprint(f"[MCP]   - {tool.name} (from {tool.server_name})", "cyan")
+                    cprint(f"[MCP]   - {tool.name}: {tool.description}", "cyan")
 
         except Exception as e:
             cprint(f"[MCP] ❌ Failed to connect to MCP servers: {e}", "red")
@@ -144,93 +155,27 @@ class MCPManager:
                 traceback.print_exc()
             self.failed = list(self.config.keys()) if self.config else []
 
-    def _convert_config_to_fastmcp_format(self) -> Dict[str, Any]:
-        """Convert your config format to FastMCP client config format."""
-        fastmcp_config = {"mcpServers": {}}
-        
-        for server_name, server_cfg in self.config.items():
-            if not server_cfg.get("enabled", True):
-                continue
-                
-            server_config = {}
-            
-            # Handle HTTP/HTTPS URLs
-            if "url" in server_cfg:
-                url = server_cfg["url"]
-                server_config["url"] = url
-                
-                # Determine transport type
-                if url.startswith("http://") or url.startswith("https://"):
-                    server_config["transport"] = "streamable-http"
-                else:
-                    cprint(f"[MCP] ⚠️  Unknown URL format for server '{server_name}': {url}", "yellow")
-                    continue
-            
-            # Handle command-based servers (stdio)
-            elif "command" in server_cfg:
-                server_config["command"] = server_cfg["command"]
-                server_config["args"] = server_cfg.get("args", [])
-                if "env" in server_cfg:
-                    server_config["env"] = server_cfg["env"]
-            
-            # Handle script paths
-            elif "script" in server_cfg:
-                script_path = server_cfg["script"]
-                if script_path.endswith(".py"):
-                    server_config["command"] = "python"
-                    server_config["args"] = [script_path]
-                elif script_path.endswith(".js"):
-                    server_config["command"] = "node"
-                    server_config["args"] = [script_path]
-                else:
-                    cprint(f"[MCP] ⚠️  Unknown script type for server '{server_name}': {script_path}", "yellow")
-                    continue
-            
-            else:
-                cprint(f"[MCP] ⚠️  Invalid server config for '{server_name}': missing url, command, or script", "yellow")
-                continue
-            
-            fastmcp_config["mcpServers"][server_name] = server_config
-        
-        return fastmcp_config
-
-    async def _fetch_all_tools(self):
-        """Fetch tools from all connected servers."""
+    async def _fetch_tools_simple(self, server_name: str):
+        """Simplified tool fetching."""
         if not self.client:
             return
             
         try:
-            # Get tools from the client
-            # Note: FastMCP 2.x client handles multi-server tool fetching automatically
             tools_response = await self.client.list_tools()
             
             self.tools = []
             self.tool_to_server = {}
             
-            # FastMCP 2.x returns tools with server prefixes for multi-server setups
             for tool_data in tools_response:
-                # Handle both dict and object formats
+                # Handle both object and dict formats
                 if hasattr(tool_data, 'name'):
-                    # Object format
                     name = tool_data.name
                     description = getattr(tool_data, 'description', '')
                     input_schema = getattr(tool_data, 'inputSchema', {})
-                    
-                    # Extract server name from tool name prefix (if present)
-                    server_name = "unknown"
-                    if "_" in name:
-                        potential_server = name.split("_")[0]
-                        if potential_server in self.connected_servers:
-                            server_name = potential_server
-                    
-                elif isinstance(tool_data, dict):
-                    # Dict format
+                else:
                     name = tool_data.get('name')
                     description = tool_data.get('description', '')
                     input_schema = tool_data.get('inputSchema', {})
-                    server_name = tool_data.get('server', 'unknown')
-                else:
-                    continue
                 
                 if name:
                     mcp_tool = MCPTool(
@@ -253,7 +198,7 @@ class MCPManager:
                 traceback.print_exc()
 
     def get_tools(self) -> List[MCPTool]:
-        """Get all available MCP tools with complete schema information."""
+        """Get all available MCP tools."""
         return self.tools
 
     def get_tool_by_name(self, name: str) -> Optional[MCPTool]:
@@ -279,86 +224,88 @@ class MCPManager:
         return [tool.to_gemini_function() for tool in self.tools]
 
     async def call_tool(self, tool_name: str, arguments: Dict[str, Any]) -> ToolCallResult:
-        """Execute a tool call via MCP protocol using FastMCP 2.x client."""
-        if not self.client:
-            return ToolCallResult(
-                success=False,
-                content=[{"type": "text", "text": "MCP client not connected"}],
-                error_message="MCP client not available"
-            )
-        
-        try:
-            # Validate tool exists
-            tool = self.get_tool_by_name(tool_name)
-            if not tool:
+        """Execute a tool call using the persistent connection."""
+        # Use lock for thread safety, but this should be very fast
+        async with self._client_lock:
+            if not self.client:
                 return ToolCallResult(
                     success=False,
-                    content=[{"type": "text", "text": f"Tool '{tool_name}' not found"}],
-                    error_message=f"Unknown tool: {tool_name}"
+                    content=[{"type": "text", "text": "MCP client not connected"}],
+                    error_message="MCP client not available"
                 )
             
-            # Validate arguments against tool schema
-            validation_error = self._validate_arguments(tool, arguments)
-            if validation_error:
-                return ToolCallResult(
-                    success=False,
-                    content=[{"type": "text", "text": f"Invalid arguments: {validation_error}"}],
-                    error_message=validation_error
-                )
-            
-            if self.verbose:
-                cprint(f"[MCP] 🔧 Calling tool '{tool_name}' with args: {arguments}", "cyan")
-            
-            # Make the actual tool call via FastMCP client
-            result = await self.client.call_tool(tool_name, arguments)
-            
-            # Handle FastMCP 2.x response format
-            if isinstance(result, str):
-                # Simple string response
-                content = [{"type": "text", "text": result}]
-                success = True
-            elif isinstance(result, dict):
-                # Dict response
-                if "error" in result:
-                    content = [{"type": "text", "text": result.get("error", "Unknown error")}]
-                    success = False
+            try:
+                # Validate tool exists
+                tool = self.get_tool_by_name(tool_name)
+                if not tool:
+                    return ToolCallResult(
+                        success=False,
+                        content=[{"type": "text", "text": f"Tool '{tool_name}' not found"}],
+                        error_message=f"Unknown tool: {tool_name}"
+                    )
+                
+                # Validate arguments (simplified)
+                validation_error = self._validate_arguments_simple(tool, arguments)
+                if validation_error:
+                    return ToolCallResult(
+                        success=False,
+                        content=[{"type": "text", "text": f"Invalid arguments: {validation_error}"}],
+                        error_message=validation_error
+                    )
+                
+                if self.verbose:
+                    cprint(f"[MCP] 🔧 Calling tool '{tool_name}' with args: {arguments}", "cyan")
+                
+                # Make the tool call - this should be very fast with persistent connection
+                result = await self.client.call_tool(tool_name, arguments)
+                
+                # Process result
+                if isinstance(result, list):
+                    content = []
+                    for item in result:
+                        if hasattr(item, '__dict__'):
+                            content.append(item.__dict__)
+                        else:
+                            content.append(item)
+                elif isinstance(result, str):
+                    content = [{"type": "text", "text": result}]
+                elif isinstance(result, dict):
+                    if "error" in result:
+                        return ToolCallResult(
+                            success=False,
+                            content=[{"type": "text", "text": result.get("error", "Unknown error")}],
+                            error_message=result.get("error", "Unknown error")
+                        )
+                    else:
+                        content = [{"type": "text", "text": str(result)}]
                 else:
                     content = [{"type": "text", "text": str(result)}]
-                    success = True
-            elif isinstance(result, list):
-                # List of content items
-                content = result
-                success = True
-            else:
-                # Other format, convert to string
-                content = [{"type": "text", "text": str(result)}]
-                success = True
-            
-            if self.verbose:
-                cprint(f"[MCP] ✅ Tool call completed. Success: {success}", "green")
-                cprint(f"[MCP] 📄 Result: {content}", "white")
-            
-            return ToolCallResult(
-                success=success,
-                content=content,
-                error_message=None if success else "Tool execution failed"
-            )
-            
-        except Exception as e:
-            error_msg = f"Tool call failed: {str(e)}"
-            cprint(f"[MCP] ❌ {error_msg}", "red")
-            if self.verbose:
-                import traceback
-                traceback.print_exc()
-            
-            return ToolCallResult(
-                success=False,
-                content=[{"type": "text", "text": error_msg}],
-                error_message=error_msg
-            )
+                
+                if self.verbose:
+                    cprint(f"[MCP] ✅ Tool call completed. Success: True", "green")
+                    cprint(f"[MCP] 📄 Result: {content}", "white")
+                
+                return ToolCallResult(
+                    success=True,
+                    content=content,
+                    error_message=None
+                )
+                
+            except Exception as e:
+                error_msg = f"Tool call failed: {str(e)}"
+                cprint(f"[MCP] ❌ {error_msg}", "red")
+                if self.verbose:
+                    import traceback
+                    traceback.print_exc()
+                
+                return ToolCallResult(
+                    success=False,
+                    content=[{"type": "text", "text": error_msg}],
+                    error_message=error_msg
+                )
 
-    def _validate_arguments(self, tool: MCPTool, arguments: Dict[str, Any]) -> Optional[str]:
-        """Validate arguments against tool schema. Returns error message if invalid."""
+    def _validate_arguments_simple(self, tool: MCPTool, arguments: Dict[str, Any]) -> Optional[str]:
+        """Simplified argument validation."""
         schema = tool.input_schema
         
         # Check required parameters
@@ -367,33 +314,7 @@ class MCPManager:
             if req_param not in arguments:
                 return f"Missing required parameter: {req_param}"
         
-        # Basic type checking for properties
-        properties = schema.get("properties", {})
-        for param_name, param_value in arguments.items():
-            if param_name in properties:
-                expected_type = properties[param_name].get("type")
-                if expected_type:
-                    if not self._check_type(param_value, expected_type):
-                        return f"Parameter '{param_name}' should be of type {expected_type}"
-        
         return None
-
-    def _check_type(self, value: Any, expected_type: str) -> bool:
-        """Basic type checking for JSON schema types."""
-        type_map = {
-            "string": str,
-            "integer": int,
-            "number": (int, float),
-            "boolean": bool,
-            "array": list,
-            "object": dict
-        }
-        
-        expected_python_type = type_map.get(expected_type)
-        if expected_python_type:
-            return isinstance(value, expected_python_type)
-        
-        return True  # Unknown type, assume valid
 
     def get_server_status(self):
         """Get status information about connected servers."""
@@ -409,7 +330,7 @@ class MCPManager:
         }
 
     async def list_tools(self):
-        """List all available tools - convenience method for debugging."""
+        """List all available tools."""
         if not self.client:
             return []
         
@@ -420,7 +341,7 @@ class MCPManager:
             return []
 
     async def close(self):
-        """Close all MCP client connections."""
+        """Close MCP client connection."""
         if self.client:
             try:
                 await self.client.__aexit__(None, None, None)

@@ -67,40 +67,99 @@ class ToolAwareAgent:
         self.agent = self._build_agent()
 
     def _wrap_tool(self, tool) -> StructuredTool:
-        def _run(**kwargs):  # REMOVE async - LangChain expects sync function
+        def _run(**kwargs):  # Sync function for LangChain
             if self.verbose:
                 cprint(f"[Agent] 🔧 Calling MCP tool: {tool.name} with {kwargs}", "cyan")
             
             # Clean kwargs - remove any LangChain-specific parameters
             clean_kwargs = {k: v for k, v in kwargs.items() if k not in ['config', 'configurable']}
             
-            # Use asyncio.run to handle the async call in sync context
-            loop = None
             try:
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    # If we're in an async context, create a new thread
-                    import concurrent.futures
-                    with concurrent.futures.ThreadPoolExecutor() as executor:
-                        future = executor.submit(asyncio.run, self.mcp.call_tool(tool.name, clean_kwargs))
-                        res = future.result()
-                else:
-                    res = asyncio.run(self.mcp.call_tool(tool.name, clean_kwargs))
-            except RuntimeError:
-                # Fallback for nested event loops
                 import concurrent.futures
-                with concurrent.futures.ThreadPoolExecutor() as executor:
-                    future = executor.submit(asyncio.run, self.mcp.call_tool(tool.name, clean_kwargs))
-                    res = future.result()
+                import threading
+                import signal
+                
+                def run_async_tool():
+                    """Run the async tool in a separate thread with its own event loop."""
+                    try:
+                        # Create a new event loop for this thread
+                        new_loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(new_loop)
+                        
+                        # Create the task with timeout
+                        async def call_with_timeout():
+                            return await asyncio.wait_for(
+                                self.mcp.call_tool(tool.name, clean_kwargs),
+                                timeout=2.0  # 2 second timeout (should be ~0.01s)
+                            )
+                        
+                        try:
+                            return new_loop.run_until_complete(call_with_timeout())
+                        except asyncio.TimeoutError:
+                            cprint(f"[Agent] ⏰ Tool '{tool.name}' timed out after 2 seconds", "yellow")
+                            
+                            class MockTimeoutResult:
+                                def __init__(self, tool_name):
+                                    self.success = False
+                                    self.error_message = f"Tool '{tool_name}' timed out"
+                                    self.tool_name = tool_name
+                                
+                                def get_text_content(self):
+                                    return f"Tool '{self.tool_name}' timed out after 2 seconds"
+                            
+                            return MockTimeoutResult(tool.name)
+                        finally:
+                            new_loop.close()
+                            
+                    except Exception as e:
+                        cprint(f"[Agent] 💥 Tool thread error: {e}", "red")
+                        
+                        class MockErrorResult:
+                            def __init__(self, error_msg):
+                                self.success = False
+                                self.error_message = error_msg
+                            
+                            def get_text_content(self):
+                                return f"Tool execution failed: {self.error_message}"
+                        
+                        return MockErrorResult(str(e))
+                
+                # Execute in thread pool with timeout
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                    future = executor.submit(run_async_tool)
+                    try:
+                        res = future.result(timeout=3.0)  # 3 second total timeout
+                    except concurrent.futures.TimeoutError:
+                        cprint(f"[Agent] ⏰ Tool '{tool.name}' execution timed out", "red")
+                        return f"[TIMEOUT] Tool '{tool.name}' took too long to execute"
+                    
+            except Exception as e:
+                if self.verbose:
+                    cprint(f"[Agent] ❌ Tool execution error: {e}", "red")
+                    import traceback
+                    traceback.print_exc()
+                return f"[TOOL ERROR] Tool execution failed: {str(e)}"
             
-            if self.verbose:
-                cprint(f"[Agent] 📄 Tool result: success={res.success}", "cyan")
-                cprint(f"[Agent] 📄 Content: {res.get_text_content()[:200]}...", "white")
-            
-            if res.success:
-                return res.get_text_content()
-            else:
-                return f"[TOOL ERROR] {res.error_message or 'Unknown error'}"
+            # Process result
+            try:
+                if self.verbose:
+                    success = getattr(res, 'success', False)
+                    cprint(f"[Agent] 📄 Tool result: success={success}", "cyan")
+                    
+                    if hasattr(res, 'get_text_content'):
+                        content = res.get_text_content()
+                        content_preview = content[:200] + "..." if len(content) > 200 else content
+                        cprint(f"[Agent] 📄 Content: {content_preview}", "white")
+                
+                if hasattr(res, 'success') and res.success:
+                    return res.get_text_content() if hasattr(res, 'get_text_content') else str(res)
+                else:
+                    error_msg = getattr(res, 'error_message', 'Unknown error')
+                    return f"[TOOL ERROR] {error_msg}"
+                    
+            except Exception as e:
+                cprint(f"[Agent] ❌ Error processing tool result: {e}", "red")
+                return f"[TOOL ERROR] Failed to process result: {str(e)}"
         
         # Create proper parameter signature for Gemini compatibility
         sig_params = []
@@ -192,7 +251,7 @@ class ToolAwareAgent:
             tools=tools, 
             verbose=self.verbose,
             max_iterations=3,  # Limit iterations to prevent loops
-            early_stopping_method="generate"  # Stop early if no more tools needed
+            early_stopping_method="force"  # Stop early if no more tools needed
         )
 
     async def run(self, text: str) -> str:
@@ -416,10 +475,18 @@ class ConversationManager:
         return f"{hist}\nUser: {user_text}\nAssistant:"
 
     async def _speak(self, text: str, tts_worker, audio_worker):
-        pipe = UltraLowLatencyTTSPipeline(tts_worker, audio_worker)
-        pipe.start_pipeline()
-        pipe.add_phrase(text)
-        return pipe.finish_pipeline() or time.time()
+        if tts_worker and audio_worker:
+            try:
+                pipe = UltraLowLatencyTTSPipeline(tts_worker, audio_worker)
+                pipe.start_pipeline()
+                pipe.add_phrase(text)
+                return pipe.finish_pipeline() or time.time()
+            except Exception as e:
+                cprint(f"[LLM] TTS pipeline error: {e}", "red")
+                return time.time()
+        else:
+            # Text-only mode or missing components
+            return time.time()
 
     def _add_history(self, role: str, content: str):
         self.history.append({"role": role, "content": content, "ts": datetime.now()})
