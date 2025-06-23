@@ -1,8 +1,6 @@
 # llm/conversation_manager.py
 """
-Conversation Manager - FINAL FIX
-The issue was that run_coroutine_threadsafe loses the FastMCP client context.
-Solution: Use thread pool with new connection for LangChain tools.
+Conversation Manager
 """
 
 from __future__ import annotations
@@ -12,8 +10,13 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from termcolor import cprint
-from .phrase_stream import PhraseStreamer, UltraLowLatencyTTSPipeline
-from .mcp_manager import MCPManager, ToolCallResult
+try:
+    from .phrase_stream import PhraseStreamer, UltraLowLatencyTTSPipeline
+    from .mcp_manager import MCPManager, ToolCallResult
+except ImportError:
+    # Handle relative import when run directly
+    from llm.phrase_stream import PhraseStreamer, UltraLowLatencyTTSPipeline
+    from llm.mcp_manager import MCPManager, ToolCallResult
 
 # ─── Lazy wrappers ───────────────────────────────────────────────────────────
 LLM_WRAPPERS: Dict[str, Any] = {}
@@ -106,7 +109,7 @@ class ToolAwareAgent:
                         async with Client(server_url) as client:
                             result = await client.call_tool(tool.name, clean_kwargs)
                             
-                            # Format result like MCPManager does
+                            # Format result like MCPManager does - but cleaner
                             if isinstance(result, list):
                                 text_parts = []
                                 for item in result:
@@ -125,11 +128,17 @@ class ToolAwareAgent:
                                     else:
                                         text_parts.append(str(item_dict))
                                 
-                                return '\n'.join(text_parts)
+                                clean_result = '\n'.join(text_parts)
                             elif isinstance(result, str):
-                                return result
+                                clean_result = result
                             else:
-                                return str(result)
+                                clean_result = str(result)
+                            
+                            # Remove duplicate prefix if present
+                            if clean_result.startswith('🔐 Secret: '):
+                                clean_result = clean_result[11:]  # Remove "🔐 Secret: " prefix
+                            
+                            return clean_result
                     
                     # Run the async call
                     return loop.run_until_complete(call_tool())
@@ -239,6 +248,8 @@ class ToolAwareAgent:
              "ALWAYS use tools when they can answer the user's question better than your knowledge. "
              "For example, if someone asks for a secret message, use the get_secret_message tool. "
              "If someone asks how many secrets you know, use the count_secrets tool. "
+             "When you get a result from a tool, provide that result to the user immediately. "
+             "Do not call the same tool multiple times unless specifically asked. "
              "Be concise but helpful in your responses."),
             MessagesPlaceholder("chat_history"),
             ("user", "{input}"),
@@ -259,8 +270,8 @@ class ToolAwareAgent:
             agent=agent, 
             tools=tools, 
             verbose=self.verbose,
-            max_iterations=3,  # Limit iterations to prevent loops
-            early_stopping_method="force"  # Stop early if no more tools needed
+            max_iterations=10,  # Allow 2 iterations max
+            early_stopping_method="force"  # Use supported method
         )
 
     async def run(self, text: str, chat_history: List[BaseMessage] = None) -> str:
