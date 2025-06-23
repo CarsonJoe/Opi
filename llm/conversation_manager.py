@@ -1,11 +1,8 @@
 # llm/conversation_manager.py
 """
-Conversation Manager with Persistent Memory
---------------------------------------------------------------------
-Edit `config.json → llm.provider` to switch model/provider:
-  • google-genai   – gemini-2.5-flash
-  • anthropic      – claude-sonnet-4-20250514
-  • openai         – GPT‑4o   (env OPENAI_API_KEY)
+Conversation Manager - FINAL FIX
+The issue was that run_coroutine_threadsafe loses the FastMCP client context.
+Solution: Use thread pool with new connection for LangChain tools.
 """
 
 from __future__ import annotations
@@ -55,6 +52,9 @@ class ToolAwareAgent:
             raise RuntimeError(f"Provider '{provider}' not installed")
         self.verbose = verbose 
         self.mcp = mcp
+        
+        # Store MCP server config for creating new connections
+        self.mcp_config = mcp.config
 
         llm_cls = LLM_WRAPPERS[provider]
         if provider == "google-genai":
@@ -75,100 +75,110 @@ class ToolAwareAgent:
             # Clean kwargs - remove any LangChain-specific parameters
             clean_kwargs = {k: v for k, v in kwargs.items() if k not in ['config', 'configurable']}
             
+            # FINAL FIX: Use thread pool with new FastMCP connection
+            # This avoids the client context issue entirely
+            def run_tool_in_thread():
+                """Run the tool in a separate thread with its own FastMCP connection"""
+                try:
+                    # Create new event loop for this thread
+                    import asyncio
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    
+                    async def call_tool():
+                        # Import here to avoid circular imports
+                        try:
+                            from fastmcp import Client
+                        except ImportError:
+                            return "FastMCP not available"
+                        
+                        # Get the server URL from MCP config
+                        server_url = None
+                        for server_name, server_config in self.mcp_config.items():
+                            if server_config.get('enabled', True) and 'url' in server_config:
+                                server_url = server_config['url']
+                                break
+                        
+                        if not server_url:
+                            return "No MCP server URL found"
+                        
+                        # Create new client connection for this tool call
+                        async with Client(server_url) as client:
+                            result = await client.call_tool(tool.name, clean_kwargs)
+                            
+                            # Format result like MCPManager does
+                            if isinstance(result, list):
+                                text_parts = []
+                                for item in result:
+                                    if hasattr(item, '__dict__'):
+                                        item_dict = item.__dict__
+                                    else:
+                                        item_dict = item
+                                    
+                                    if isinstance(item_dict, dict):
+                                        if item_dict.get('type') == 'text':
+                                            text_parts.append(item_dict.get('text', ''))
+                                        elif 'text' in item_dict:
+                                            text_parts.append(str(item_dict['text']))
+                                    elif isinstance(item_dict, str):
+                                        text_parts.append(item_dict)
+                                    else:
+                                        text_parts.append(str(item_dict))
+                                
+                                return '\n'.join(text_parts)
+                            elif isinstance(result, str):
+                                return result
+                            else:
+                                return str(result)
+                    
+                    # Run the async call
+                    return loop.run_until_complete(call_tool())
+                    
+                except Exception as e:
+                    if self.verbose:
+                        cprint(f"[Agent] Tool thread error: {e}", "red")
+                    return f"Tool execution failed: {str(e)}"
+                finally:
+                    try:
+                        loop.close()
+                    except:
+                        pass
+            
+            # Use thread pool executor to run the tool
             try:
                 import concurrent.futures
-                import threading
                 
-                def run_async_tool():
-                    """Run the async tool in a separate thread with its own event loop."""
-                    try:
-                        # Create a new event loop for this thread
-                        new_loop = asyncio.new_event_loop()
-                        asyncio.set_event_loop(new_loop)
-                        
-                        # Create the task with timeout
-                        async def call_with_timeout():
-                            return await asyncio.wait_for(
-                                self.mcp.call_tool(tool.name, clean_kwargs),
-                                timeout=2.0  # 2 second timeout (should be ~0.01s)
-                            )
-                        
-                        try:
-                            return new_loop.run_until_complete(call_with_timeout())
-                        except asyncio.TimeoutError:
-                            cprint(f"[Agent] ⏰ Tool '{tool.name}' timed out after 2 seconds", "green")
-                            
-                            class MockTimeoutResult:
-                                def __init__(self, tool_name):
-                                    self.success = False
-                                    self.error_message = f"Tool '{tool_name}' timed out"
-                                    self.tool_name = tool_name
-                                
-                                def get_text_content(self):
-                                    return f"Tool '{self.tool_name}' timed out after 2 seconds"
-                            
-                            return MockTimeoutResult(tool.name)
-                        finally:
-                            new_loop.close()
-                            
-                    except Exception as e:
-                        cprint(f"[Agent] 💥 Tool thread error: {e}", "green")
-                        
-                        class MockErrorResult:
-                            def __init__(self, error_msg):
-                                self.success = False
-                                self.error_message = error_msg
-                            
-                            def get_text_content(self):
-                                return f"Tool execution failed: {self.error_message}"
-                        
-                        return MockErrorResult(str(e))
-                
-                # Execute in thread pool with timeout
                 with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                    future = executor.submit(run_async_tool)
+                    future = executor.submit(run_tool_in_thread)
+                    
                     try:
-                        res = future.result(timeout=3.0)  # 3 second total timeout
+                        result = future.result(timeout=10.0)  # 10 second timeout
+                        
+                        if self.verbose:
+                            result_preview = result[:200] + "..." if len(str(result)) > 200 else str(result)
+                            cprint(f"[Agent] 📄 Tool result: {result_preview}", "green")
+                        
+                        return str(result)
+                        
                     except concurrent.futures.TimeoutError:
-                        cprint(f"[Agent] ⏰ Tool '{tool.name}' execution timed out", "green")
-                        return f"[TIMEOUT] Tool '{tool.name}' took too long to execute"
+                        cprint(f"[Agent] ⏰ Tool '{tool.name}' timed out after 10 seconds", "yellow")
+                        return f"Tool '{tool.name}' timed out"
                     
             except Exception as e:
                 if self.verbose:
                     cprint(f"[Agent] ❌ Tool execution error: {e}", "red")
                     import traceback
                     traceback.print_exc()
-                return f"[Agent] TOOL ERROR Tool execution failed: {str(e)}"
-            
-            # Process result
-            try:
-                if self.verbose:
-                    success = getattr(res, 'success', False)
-                    cprint(f"[Agent] 📄 Tool result: success={success}", "green")
-                    
-                    if hasattr(res, 'get_text_content'):
-                        content = res.get_text_content()
-                        content_preview = content[:200] + "..." if len(content) > 200 else content
-                        cprint(f"[Agent] 📄 Content: {content_preview}", "green")
-                
-                if hasattr(res, 'success') and res.success:
-                    return res.get_text_content() if hasattr(res, 'get_text_content') else str(res)
-                else:
-                    error_msg = getattr(res, 'error_message', 'Unknown error')
-                    return f"[Agent] TOOL ERROR {error_msg}"
-                    
-            except Exception as e:
-                cprint(f"[Agent] ❌ Error processing tool result: {e}", "red")
-                return f"[TOOL ERROR] Failed to process result: {str(e)}"
+                return f"Tool execution failed: {str(e)}"
         
-        # FIXED: Create proper parameter signature for LangChain compatibility
-        from typing import Any, Union
+        # Create proper parameter signature for LangChain compatibility
+        from typing import Any
         
-        # Map JSON schema types to Python types, including proper handling of "number"
+        # Map JSON schema types to Python types
         TYPE_MAPPING = {
             "string": str,
             "integer": int,
-            "number": float,  # FIXED: Map "number" to float instead of causing KeyError
+            "number": float,
             "boolean": bool,
             "array": list,
             "object": dict,
@@ -183,9 +193,7 @@ class ToolAwareAgent:
         if properties:
             for param_name, param_info in properties.items():
                 param_type = param_info.get("type", "string")
-                
-                # FIXED: Use the TYPE_MAPPING to handle all schema types properly
-                python_type = TYPE_MAPPING.get(param_type, str)  # Default to str for unknown types
+                python_type = TYPE_MAPPING.get(param_type, str)
                 
                 # Handle Union types for optional parameters
                 if param_name not in required:
@@ -212,14 +220,12 @@ class ToolAwareAgent:
             for param in sig_params
             if param.annotation is not inspect.Parameter.empty
         }
-            # Create the StructuredTool without explicit args_schema to avoid Pydantic issues
-        # Let LangChain infer the schema from the function signature
+            
+        # Create the StructuredTool
         return StructuredTool.from_function(
             _run,
             name=tool.name,
             description=tool.description,
-            # FIXED: Don't pass args_schema, let LangChain infer from signature
-            # This avoids Pydantic validation issues with complex schemas
         )
 
     def _build_agent(self):
