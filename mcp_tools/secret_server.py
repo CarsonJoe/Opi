@@ -9,6 +9,7 @@ import random
 import datetime
 import os
 import psutil
+import sys
 
 # Create the FastMCP server instance
 mcp = FastMCP("Secret Message Server")
@@ -102,10 +103,37 @@ Provide examples of how to use each tool."""
 
 if __name__ == "__main__":
     print("🔐 Starting Secret Message MCP Server...")
-    print("Available transports:")
-    print("  - STDIO (default): mcp.run()")
-    print("  - HTTP: mcp.run('streamable-http', host='127.0.0.1', port=8000)")
-    print("  - SSE: mcp.run('sse', host='127.0.0.1', port=8000)")
     
-    # Default STDIO transport for local development
-    mcp.run()
+    # Check for command line arguments
+    transport = "http"  # Default
+    
+    if len(sys.argv) > 1:
+        if "--http" in sys.argv:
+            transport = "http"
+        elif "--sse" in sys.argv:
+            transport = "sse"
+        elif "--stdio" in sys.argv:
+            transport = "stdio"
+    
+    print("Available transports:")
+    print("  - STDIO (default): python secret_server.py --stdio")
+    print("  - HTTP: python secret_server.py --http")
+    print("  - SSE: python secret_server.py --sse")
+    print()
+    
+    if transport == "http":
+        print("🌐 Starting HTTP transport on 127.0.0.1:8000...")
+        print("📍 Server URL: http://127.0.0.1:8000")
+        print("💡 Update your config.json to use this HTTP URL")
+        mcp.run('streamable-http', host='127.0.0.1', port=8000)
+    
+    elif transport == "sse":
+        print("📡 Starting SSE transport on 127.0.0.1:8001...")
+        print("📍 Server URL: http://127.0.0.1:8001")
+        mcp.run('sse', host='127.0.0.1', port=8001)
+    
+    else:
+        print("🔌 Starting STDIO transport (for local MCP clients)...")
+        print("💡 Use this with your Opi config.json stdio transport")
+        # Default STDIO transport for local development
+        mcp.run()
