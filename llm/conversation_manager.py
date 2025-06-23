@@ -1,11 +1,11 @@
 # llm/conversation_manager.py
 """
-Conversation Manager 4.5 – FIXED tool calling with proper error handling
+Conversation Manager with Persistent Memory
 --------------------------------------------------------------------
-Edit `config.json → llm.provider` to switch backend:
-  • google-genai   – Gemini      (env GOOGLE_API_KEY)
-  • anthropic      – Claude 3/4  (env ANTHROPIC_API_KEY)
-  • openai         – GPT‑4/3.5   (env OPENAI_API_KEY)
+Edit `config.json → llm.provider` to switch model/provider:
+  • google-genai   – gemini-2.5-flash
+  • anthropic      – claude-sonnet-4-20250514
+  • openai         – GPT‑4o   (env OPENAI_API_KEY)
 """
 
 from __future__ import annotations
@@ -37,6 +37,7 @@ except ImportError:
     pass
 
 from langchain_core.tools import StructuredTool
+from langchain_core.messages import HumanMessage, AIMessage, BaseMessage
 from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain.agents import AgentExecutor, create_tool_calling_agent
 
@@ -52,7 +53,7 @@ class ToolAwareAgent:
                  model: str, temp: float, api_key: str, verbose=False):
         if provider not in LLM_WRAPPERS:
             raise RuntimeError(f"Provider '{provider}' not installed")
-        self.verbose = verbose or os.getenv("OPI_DEBUG", "0") == "1"
+        self.verbose = verbose 
         self.mcp = mcp
 
         llm_cls = LLM_WRAPPERS[provider]
@@ -69,7 +70,7 @@ class ToolAwareAgent:
     def _wrap_tool(self, tool) -> StructuredTool:
         def _run(**kwargs):  # Sync function for LangChain
             if self.verbose:
-                cprint(f"[Agent] 🔧 Calling MCP tool: {tool.name} with {kwargs}", "cyan")
+                cprint(f"[Agent] 🔧 Calling MCP tool: {tool.name} with {kwargs}", "green")
             
             # Clean kwargs - remove any LangChain-specific parameters
             clean_kwargs = {k: v for k, v in kwargs.items() if k not in ['config', 'configurable']}
@@ -95,7 +96,7 @@ class ToolAwareAgent:
                         try:
                             return new_loop.run_until_complete(call_with_timeout())
                         except asyncio.TimeoutError:
-                            cprint(f"[Agent] ⏰ Tool '{tool.name}' timed out after 2 seconds", "yellow")
+                            cprint(f"[Agent] ⏰ Tool '{tool.name}' timed out after 2 seconds", "green")
                             
                             class MockTimeoutResult:
                                 def __init__(self, tool_name):
@@ -111,7 +112,7 @@ class ToolAwareAgent:
                             new_loop.close()
                             
                     except Exception as e:
-                        cprint(f"[Agent] 💥 Tool thread error: {e}", "red")
+                        cprint(f"[Agent] 💥 Tool thread error: {e}", "green")
                         
                         class MockErrorResult:
                             def __init__(self, error_msg):
@@ -129,7 +130,7 @@ class ToolAwareAgent:
                     try:
                         res = future.result(timeout=3.0)  # 3 second total timeout
                     except concurrent.futures.TimeoutError:
-                        cprint(f"[Agent] ⏰ Tool '{tool.name}' execution timed out", "red")
+                        cprint(f"[Agent] ⏰ Tool '{tool.name}' execution timed out", "green")
                         return f"[TIMEOUT] Tool '{tool.name}' took too long to execute"
                     
             except Exception as e:
@@ -137,24 +138,24 @@ class ToolAwareAgent:
                     cprint(f"[Agent] ❌ Tool execution error: {e}", "red")
                     import traceback
                     traceback.print_exc()
-                return f"[TOOL ERROR] Tool execution failed: {str(e)}"
+                return f"[Agent] TOOL ERROR Tool execution failed: {str(e)}"
             
             # Process result
             try:
                 if self.verbose:
                     success = getattr(res, 'success', False)
-                    cprint(f"[Agent] 📄 Tool result: success={success}", "cyan")
+                    cprint(f"[Agent] 📄 Tool result: success={success}", "green")
                     
                     if hasattr(res, 'get_text_content'):
                         content = res.get_text_content()
                         content_preview = content[:200] + "..." if len(content) > 200 else content
-                        cprint(f"[Agent] 📄 Content: {content_preview}", "white")
+                        cprint(f"[Agent] 📄 Content: {content_preview}", "green")
                 
                 if hasattr(res, 'success') and res.success:
                     return res.get_text_content() if hasattr(res, 'get_text_content') else str(res)
                 else:
                     error_msg = getattr(res, 'error_message', 'Unknown error')
-                    return f"[TOOL ERROR] {error_msg}"
+                    return f"[Agent] TOOL ERROR {error_msg}"
                     
             except Exception as e:
                 cprint(f"[Agent] ❌ Error processing tool result: {e}", "red")
@@ -256,14 +257,14 @@ class ToolAwareAgent:
             early_stopping_method="force"  # Stop early if no more tools needed
         )
 
-    async def run(self, text: str) -> str:
+    async def run(self, text: str, chat_history: List[BaseMessage] = None) -> str:
         try:
             if self.verbose:
                 cprint(f"[Agent] 🎯 Processing: '{text}'", "cyan")
             
             out = await self.agent.ainvoke({
                 "input": text,
-                "chat_history": []  # Add proper chat history if needed
+                "chat_history": chat_history or []  # Use provided chat history
             })
             
             # Handle both string and list outputs from agent
@@ -285,9 +286,6 @@ class ToolAwareAgent:
             # Now ensure it's a string
             result = str(result).strip()
             
-            if self.verbose:
-                cprint(f"[Agent] ✅ Result: '{result}'", "green")
-            
             return result
             
         except Exception as e:
@@ -307,8 +305,13 @@ class ConversationManager:
 
         self.agent: Optional[ToolAwareAgent] = None
         self.fast_llm = None
+        
+        # NEW: Proper conversation memory using LangChain messages
+        self.conversation_history: List[BaseMessage] = []
+        self.max_history = 20  # Keep last 20 messages (10 exchanges)
+        
+        # Legacy history for fast_llm fallback
         self.history: List[Dict[str, Any]] = []
-        self.max_history = 10
 
     # ── Init ────────────────────────────────────────────────────────────────
     async def initialize(self):
@@ -349,19 +352,52 @@ class ConversationManager:
         except Exception as e:
             cprint(f"[LLM] ⚠️  fast model init failed: {e}", "yellow")
 
+    # ── NEW: Memory management methods ──────────────────────────────────────
+    def _add_to_conversation(self, role: str, content: str):
+        """Add message to conversation history in LangChain format"""
+        if role == "user":
+            self.conversation_history.append(HumanMessage(content=content))
+        else:
+            self.conversation_history.append(AIMessage(content=content))
+        
+        # Keep only recent messages to prevent context overflow
+        if len(self.conversation_history) > self.max_history:
+            self.conversation_history = self.conversation_history[-self.max_history:]
+        
+        # Also update legacy history for fast_llm fallback
+        self._add_history(role, content)
+
+    def get_conversation_context(self) -> List[BaseMessage]:
+        """Get conversation history excluding the current message"""
+        return self.conversation_history[:-1] if self.conversation_history else []
+
+    def clear_conversation(self):
+        """Clear conversation memory"""
+        self.conversation_history = []
+        self.history = []
+        cprint("[Memory] 🔄 Conversation memory cleared", "yellow")
+
     # ── Main entry ──────────────────────────────────────────────────────────
     async def process_user_input_streaming(self, text: str, *_,
                                            tts_worker=None, audio_worker=None,
                                            debug=False):
+        # Add user message to conversation history first
+        self._add_to_conversation("user", text)
+        
         # ALWAYS try the agent first if available
         if self.agent:
             try:
                 if debug:
                     cprint(f"[LLM] 🎯 Using agent for: '{text}'", "cyan")
+                    cprint(f"[Memory] 📚 Using {len(self.conversation_history)-1} previous messages", "cyan")
                 
-                reply = await self.agent.run(text)
+                # Pass conversation history to agent (excluding current user message)
+                reply = await self.agent.run(text, self.get_conversation_context())
                 
                 if reply and reply.strip():
+                    # Add assistant response to conversation history
+                    self._add_to_conversation("assistant", reply)
+                    
                     if debug:
                         cprint(f"[LLM] ✅ Agent replied: '{reply[:100]}...'", "green")
                     return await self._speak(reply, tts_worker, audio_worker)
@@ -375,7 +411,9 @@ class ConversationManager:
                     import traceback
                     traceback.print_exc()
                 # Don't fall back to fast stream, try to fix the issue
-                return await self._speak("Sorry, I encountered an error with my tools. Let me try a different approach.", tts_worker, audio_worker)
+                error_response = "Sorry, I encountered an error with my tools. Let me try a different approach."
+                self._add_to_conversation("assistant", error_response)
+                return await self._speak(error_response, tts_worker, audio_worker)
         
         # Only use fast stream if no agent available
         if debug:
@@ -385,10 +423,20 @@ class ConversationManager:
     # ── Fast path (provider‑specific) ───────────────────────────────────────
     async def _fast_stream(self, text: str, tts_worker, audio_worker):
         if not self.fast_llm:
-            return await self._speak("Sorry, my language model is offline.",
-                                     tts_worker, audio_worker)
+            error_response = "Sorry, my language model is offline."
+            self._add_to_conversation("assistant", error_response)
+            return await self._speak(error_response, tts_worker, audio_worker)
 
-        prompt = self._history_prompt(text)
+        # Build conversation context from LangChain messages
+        context_messages = []
+        for msg in self.conversation_history[-10:]:  # Last 10 messages
+            if isinstance(msg, HumanMessage):
+                context_messages.append(f"User: {msg.content}")
+            elif isinstance(msg, AIMessage):
+                context_messages.append(f"Assistant: {msg.content}")
+        
+        context = "\n".join(context_messages[:-1])  # Exclude current user message
+        prompt = f"{context}\nUser: {text}\nAssistant:" if context else f"User: {text}\nAssistant:"
 
         def _call() -> str:
             # Gemini ---------------------------------------------------------
@@ -414,17 +462,20 @@ class ConversationManager:
             raise RuntimeError("Unknown LLM client")
 
         full = await asyncio.get_event_loop().run_in_executor(None, _call)
-        self._add_history("assistant", full)
+        self._add_to_conversation("assistant", full)
         return await self._speak(full, tts_worker, audio_worker)
 
     # ── Text‑only generator (CLI) ───────────────────────────────────────────
     async def _stream_llm_response(self, text: str):
+        # Add user message to conversation history
+        self._add_to_conversation("user", text)
+        
         # Always try agent first if available
         if self.agent:
             try:
-                reply = await self.agent.run(text)
+                reply = await self.agent.run(text, self.get_conversation_context())
                 if reply and reply.strip():
-                    self._add_history("assistant", reply)
+                    self._add_to_conversation("assistant", reply)
                     # Yield response in chunks for text-only mode
                     for sent in re.split(r"(?<=[.!?])\s+", reply):
                         if sent:
@@ -433,13 +484,27 @@ class ConversationManager:
                     return
             except Exception as e:
                 cprint(f"[LLM] Agent error in text mode: {e}", "red")
-                yield f"(Agent error: {e}) "
+                error_msg = f"(Agent error: {e}) "
+                self._add_to_conversation("assistant", error_msg)
+                yield error_msg
         
-        # Fallback to fast LLM
+        # Fallback to fast LLM with conversation context
         if not self.fast_llm:
-            yield "(LLM unavailable)"; return
+            error_msg = "(LLM unavailable)"
+            self._add_to_conversation("assistant", error_msg)
+            yield error_msg
+            return
 
-        prompt = self._history_prompt(text)
+        # Build conversation context
+        context_messages = []
+        for msg in self.conversation_history[-10:]:
+            if isinstance(msg, HumanMessage):
+                context_messages.append(f"User: {msg.content}")
+            elif isinstance(msg, AIMessage):
+                context_messages.append(f"Assistant: {msg.content}")
+        
+        context = "\n".join(context_messages[:-1])  # Exclude current user message
+        prompt = f"{context}\nUser: {text}\nAssistant:" if context else f"User: {text}\nAssistant:"
 
         def _call() -> str:
             if hasattr(self.fast_llm, "generate_content"):
@@ -461,7 +526,7 @@ class ConversationManager:
             raise RuntimeError("Unknown LLM client")
 
         full = await asyncio.get_event_loop().run_in_executor(None, _call)
-        self._add_history("assistant", full)
+        self._add_to_conversation("assistant", full)
         for sent in re.split(r"(?<=[.!?])\s+", full):
             if sent:
                 yield sent + " "
@@ -469,9 +534,10 @@ class ConversationManager:
 
     # ── Helpers ─────────────────────────────────────────────────────────═══
     def _history_prompt(self, user_text: str) -> str:
+        """Legacy method for backward compatibility"""
         hist = "\n".join(
             ("User: " if h["role"] == "user" else "Assistant: ") + h["content"]
-            for h in self.history[-self.max_history:]
+            for h in self.history[-10:]
         )
         self._add_history("user", user_text)
         return f"{hist}\nUser: {user_text}\nAssistant:"
@@ -491,9 +557,10 @@ class ConversationManager:
             return time.time()
 
     def _add_history(self, role: str, content: str):
+        """Legacy history method for backward compatibility"""
         self.history.append({"role": role, "content": content, "ts": datetime.now()})
-        if len(self.history) > 2 * self.max_history:
-            self.history = self.history[-self.max_history:]
+        if len(self.history) > 20:
+            self.history = self.history[-10:]
 
     _add_to_history = _add_history  # legacy alias
 
