@@ -77,7 +77,6 @@ class ToolAwareAgent:
             try:
                 import concurrent.futures
                 import threading
-                import signal
                 
                 def run_async_tool():
                     """Run the async tool in a separate thread with its own event loop."""
@@ -161,28 +160,40 @@ class ToolAwareAgent:
                 cprint(f"[Agent] ❌ Error processing tool result: {e}", "red")
                 return f"[TOOL ERROR] Failed to process result: {str(e)}"
         
-        # Create proper parameter signature for Gemini compatibility
+        # FIXED: Create proper parameter signature for LangChain compatibility
+        from typing import Any, Union
+        
+        # Map JSON schema types to Python types, including proper handling of "number"
+        TYPE_MAPPING = {
+            "string": str,
+            "integer": int,
+            "number": float,  # FIXED: Map "number" to float instead of causing KeyError
+            "boolean": bool,
+            "array": list,
+            "object": dict,
+            "any": Any
+        }
+        
+        # Create parameter signature from tool schema
         sig_params = []
         properties = tool.input_schema.get("properties", {})
         required = tool.input_schema.get("required", [])
         
-        # If no properties, create a simple function
-        if not properties:
-            sig_params = []
-        else:
+        if properties:
             for param_name, param_info in properties.items():
                 param_type = param_info.get("type", "string")
-                # Convert JSON schema types to Python types
-                python_type = {
-                    "string": str,
-                    "integer": int,
-                    "number": float,
-                    "boolean": bool,
-                    "array": list,
-                    "object": dict
-                }.get(param_type, str)
                 
-                default = inspect.Parameter.empty if param_name in required else None
+                # FIXED: Use the TYPE_MAPPING to handle all schema types properly
+                python_type = TYPE_MAPPING.get(param_type, str)  # Default to str for unknown types
+                
+                # Handle Union types for optional parameters
+                if param_name not in required:
+                    from typing import Optional
+                    python_type = Optional[python_type]
+                    default = None
+                else:
+                    default = inspect.Parameter.empty
+                
                 sig_params.append(
                     inspect.Parameter(
                         param_name, 
@@ -192,31 +203,22 @@ class ToolAwareAgent:
                     )
                 )
         
+        # Set the function signature
         _run.__signature__ = inspect.Signature(sig_params)
         
-        # Create a clean schema for LangChain/Gemini
-        clean_schema = {}
-        if properties:
-            clean_schema = {
-                "type": "object",
-                "properties": {},
-                "required": required
-            }
-            
-            for prop_name, prop_info in properties.items():
-                clean_prop = {"type": prop_info.get("type", "string")}
-                if "description" in prop_info:
-                    clean_prop["description"] = prop_info["description"]
-                # Handle array types properly for Gemini
-                if prop_info.get("type") == "array" and "items" in prop_info:
-                    clean_prop["items"] = prop_info["items"]
-                clean_schema["properties"][prop_name] = clean_prop
-        
+        _run.__annotations__ = {
+            param.name: param.annotation
+            for param in sig_params
+            if param.annotation is not inspect.Parameter.empty
+        }
+            # Create the StructuredTool without explicit args_schema to avoid Pydantic issues
+        # Let LangChain infer the schema from the function signature
         return StructuredTool.from_function(
             _run,
             name=tool.name,
             description=tool.description,
-            args_schema=None if not clean_schema else None,  # Let LangChain infer from signature
+            # FIXED: Don't pass args_schema, let LangChain infer from signature
+            # This avoids Pydantic validation issues with complex schemas
         )
 
     def _build_agent(self):

@@ -136,6 +136,7 @@ class MCPManager:
             # Create and connect FastMCP client directly
             self.client = Client(url)
             await self.client.__aenter__()
+
             
             # Fetch tools
             await self._fetch_tools_simple(server_name)
