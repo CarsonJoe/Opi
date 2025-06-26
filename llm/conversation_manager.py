@@ -245,11 +245,6 @@ class ToolAwareAgent:
             ("system",
              "You are Opi, an on‑device assistant running on an Orange Pi. "
              "You have access to tools that can provide better information or perform actions. "
-             "ALWAYS use tools when they can answer the user's question better than your knowledge. "
-             "For example, if someone asks for a secret message, use the get_secret_message tool. "
-             "If someone asks how many secrets you know, use the count_secrets tool. "
-             "When you get a result from a tool, provide that result to the user immediately. "
-             "Do not call the same tool multiple times unless specifically asked. "
              "Be concise but helpful in your responses."),
             MessagesPlaceholder("chat_history"),
             ("user", "{input}"),
@@ -257,12 +252,9 @@ class ToolAwareAgent:
         ])
         
         if self.verbose:
-            cprint("\n=== UPDATED TOOL PROMPT ===", "cyan", attrs=["bold"])
-            cprint(str(prompt), "cyan")
             cprint(f"Available tools: {len(tools)}", "yellow")
             for t in tools:
                 cprint(f" • {t.name}: {t.description}", "yellow")
-            cprint("===========================\n", "cyan", attrs=["bold"])
         
         # Use create_tool_calling_agent instead of create_structured_chat_agent
         agent = create_tool_calling_agent(self.llm, tools, prompt)
