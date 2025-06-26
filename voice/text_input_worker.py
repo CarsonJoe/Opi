@@ -22,12 +22,8 @@ class TextInputWorker:
         """Process text input from CLI."""
         try:
             if text_only_mode:
-                cprint("\n[Text] 💬 TEXT-ONLY MODE", "cyan", attrs=['bold'])
-                cprint("[Text] Type your messages below (type 'quit' or 'exit' to stop):", "green")
-                prompt = "You: "
+                prompt = ""
             else:
-                cprint("\n[Text] 💬 HYBRID MODE - Voice + Text", "cyan", attrs=['bold'])
-                cprint("[Text] You can type messages while voice is active (type 'quit' to stop text input):", "green")
                 prompt = "Type: "
             
             while not stop_event.is_set():

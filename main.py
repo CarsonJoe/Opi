@@ -147,16 +147,6 @@ class OpiVoiceAssistant:
         # Print LangSmith status
         self.langsmith_config.print_status(verbose=self.verbose)
 
-        if text_only_mode:
-            cprint("[Opi] Initializing in TEXT-ONLY mode with LangSmith tracing...", "cyan", attrs=['bold'])
-        elif hybrid_mode:
-            cprint("[Opi] Initializing in HYBRID mode (voice + text) with LangSmith...", "cyan", attrs=['bold'])
-        else:
-            if self.verbose:
-                cprint("[Opi] Initializing voice assistant with LangSmith (VERBOSE MODE)...", "cyan", attrs=['bold'])
-            else:
-                cprint("[Opi] Initializing voice assistant with LangSmith...", "cyan", attrs=['bold'])
-
         # Initialize voice components (skip in text-only mode)
         if not text_only_mode:
             await self._init_voice_components()
@@ -171,7 +161,7 @@ class OpiVoiceAssistant:
         if self.verbose and not text_only_mode:
             await self._test_streaming_processing()
 
-        cprint("[Opi] ✅ All components initialized with LangSmith tracing", "green", attrs=['bold'])
+        cprint("[Opi] ✅ All components initialized ", "green", attrs=['bold'])
 
     async def _init_text_components(self):
         """Initialize text input components."""
@@ -214,7 +204,7 @@ class OpiVoiceAssistant:
 
     async def _init_llm_components(self):
         """Initialize LLM and MCP components with LangSmith integration."""
-        cprint("[Opi] Initializing LLM components with LangSmith...", "yellow")
+        cprint("[Opi] Initializing LLM components...", "yellow")
 
         # Validate LLM configuration
         if not self.config.llm.api_key:
@@ -299,16 +289,16 @@ class OpiVoiceAssistant:
         self.running = True
 
         if self.text_only_mode:
-            cprint("[Opi] 💬 Starting TEXT-ONLY mode with LangSmith... Type to chat!", "blue", attrs=['bold'])
+            cprint("[Opi] 💬 Starting TEXT-ONLY mode... Type to chat!", "blue", attrs=['bold'])
             await self._text_only_loop()
         elif self.hybrid_mode:
-            cprint("[Opi] 🎤💬 Starting HYBRID mode with LangSmith... Voice + Text!", "blue", attrs=['bold'])
+            cprint("[Opi] 🎤💬 Starting HYBRID mode... Voice + Text!", "blue", attrs=['bold'])
             await self._hybrid_loop()
         else:
             if self.verbose:
-                cprint("[Opi] 🚀 Starting voice assistant with LangSmith (VERBOSE MODE)... Listening!", "blue", attrs=['bold'])
+                cprint("[Opi] 🚀 Starting voice assistant (VERBOSE MODE)... Listening!", "blue", attrs=['bold'])
             else:
-                cprint("[Opi] 🚀 Starting voice assistant with LangSmith... Listening!", "blue", attrs=['bold'])
+                cprint("[Opi] 🚀 Starting voice assistant... Listening!", "blue", attrs=['bold'])
             await self._voice_only_loop()
 
     async def _text_only_loop(self):
@@ -368,11 +358,6 @@ class OpiVoiceAssistant:
         """Unified processing loop with LangSmith tracing."""
         interaction_count = 0
 
-        if self.text_only_mode:
-            cprint("[Opi] 💬 Ready with LangSmith! Type your messages...", "green", attrs=['bold'])
-        else:
-            cprint("[Opi] 🎤💬 Ready with LangSmith! Listening for speech and text...", "green", attrs=['bold'])
-
         while self.running and not self.stop_event.is_set():
             try:
                 input_data = await asyncio.get_event_loop().run_in_executor(
@@ -402,9 +387,7 @@ class OpiVoiceAssistant:
                 else:
                     self.streaming_metrics['voice_inputs'] += 1
 
-                # Show input with source indicator
-                source_icon = "💬" if input_source == 'text' else "👂"
-                cprint(f"[Opi] {source_icon} {input_source.title()}: \"{user_text}\"", "white")
+                source_indicator = "typed" if input_source == 'text' else "spoken"
 
                 # Check for exit commands
                 if self._is_exit_command(user_text):

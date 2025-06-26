@@ -69,22 +69,13 @@ class ToolAwareAgent:
 
     def _wrap_tool(self, tool) -> StructuredTool:
         def _run(**kwargs):  # Sync function for LangChain
-            if self.verbose:
-                cprint(f"[Agent] 🔧 Calling MCP tool: {tool.name} with {kwargs}", "green")
-            
-            # Clean kwargs - remove any LangChain-specific parameters
             clean_kwargs = {k: v for k, v in kwargs.items() if k not in ['config', 'configurable']}
             
-            # SIMPLIFIED: Use the sync version directly - no async/thread complications
+            cprint(f"     {tool.name}({', '.join([f'{k}={v}' for k, v in clean_kwargs.items()])})", "cyan")
+            
             try:
                 result = self.mcp.call_tool_sync(tool.name, clean_kwargs)
                 
-                if self.verbose:
-                    result_text = result.get_text_content() if hasattr(result, 'get_text_content') else str(result)
-                    result_preview = result_text[:200] + "..." if len(result_text) > 200 else result_text
-                    cprint(f"[Agent] 📄 Tool result: {result_preview}", "green")
-                
-                # Return the text content for LangChain
                 if hasattr(result, 'get_text_content'):
                     return result.get_text_content()
                 else:
@@ -182,7 +173,7 @@ class ToolAwareAgent:
             agent=agent, 
             tools=tools, 
             verbose=self.verbose,
-            max_iterations=3,  # Reduce from 10 to 3 to prevent loops
+            max_iterations=20,
             early_stopping_method="force",
             max_execution_time=30,  # Add timeout
             return_intermediate_steps=False  # Don't return intermediate steps
