@@ -1,6 +1,6 @@
 # llm/conversation_manager.py
 """
-Conversation Manager
+Conversation Manager with Fixed MCP Integration
 """
 
 from __future__ import annotations
@@ -55,9 +55,6 @@ class ToolAwareAgent:
             raise RuntimeError(f"Provider '{provider}' not installed")
         self.verbose = verbose 
         self.mcp = mcp
-        
-        # Store MCP server config for creating new connections
-        self.mcp_config = mcp.config
 
         llm_cls = LLM_WRAPPERS[provider]
         if provider == "google-genai":
@@ -78,107 +75,28 @@ class ToolAwareAgent:
             # Clean kwargs - remove any LangChain-specific parameters
             clean_kwargs = {k: v for k, v in kwargs.items() if k not in ['config', 'configurable']}
             
-            # FINAL FIX: Use thread pool with new FastMCP connection
-            # This avoids the client context issue entirely
-            def run_tool_in_thread():
-                """Run the tool in a separate thread with its own FastMCP connection"""
-                try:
-                    # Create new event loop for this thread
-                    import asyncio
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                    
-                    async def call_tool():
-                        # Import here to avoid circular imports
-                        try:
-                            from fastmcp import Client
-                        except ImportError:
-                            return "FastMCP not available"
-                        
-                        # Get the server URL from MCP config
-                        server_url = None
-                        for server_name, server_config in self.mcp_config.items():
-                            if server_config.get('enabled', True) and 'url' in server_config:
-                                server_url = server_config['url']
-                                break
-                        
-                        if not server_url:
-                            return "No MCP server URL found"
-                        
-                        # Create new client connection for this tool call
-                        async with Client(server_url) as client:
-                            result = await client.call_tool(tool.name, clean_kwargs)
-                            
-                            # Format result like MCPManager does - but cleaner
-                            if isinstance(result, list):
-                                text_parts = []
-                                for item in result:
-                                    if hasattr(item, '__dict__'):
-                                        item_dict = item.__dict__
-                                    else:
-                                        item_dict = item
-                                    
-                                    if isinstance(item_dict, dict):
-                                        if item_dict.get('type') == 'text':
-                                            text_parts.append(item_dict.get('text', ''))
-                                        elif 'text' in item_dict:
-                                            text_parts.append(str(item_dict['text']))
-                                    elif isinstance(item_dict, str):
-                                        text_parts.append(item_dict)
-                                    else:
-                                        text_parts.append(str(item_dict))
-                                
-                                clean_result = '\n'.join(text_parts)
-                            elif isinstance(result, str):
-                                clean_result = result
-                            else:
-                                clean_result = str(result)
-                            
-                            # Remove duplicate prefix if present
-                            if clean_result.startswith('🔐 Secret: '):
-                                clean_result = clean_result[11:]  # Remove "🔐 Secret: " prefix
-                            
-                            return clean_result
-                    
-                    # Run the async call
-                    return loop.run_until_complete(call_tool())
-                    
-                except Exception as e:
-                    if self.verbose:
-                        cprint(f"[Agent] Tool thread error: {e}", "red")
-                    return f"Tool execution failed: {str(e)}"
-                finally:
-                    try:
-                        loop.close()
-                    except:
-                        pass
-            
-            # Use thread pool executor to run the tool
+            # SIMPLIFIED: Use the sync version directly - no async/thread complications
             try:
-                import concurrent.futures
+                result = self.mcp.call_tool_sync(tool.name, clean_kwargs)
                 
-                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                    future = executor.submit(run_tool_in_thread)
-                    
-                    try:
-                        result = future.result(timeout=10.0)  # 10 second timeout
-                        
-                        if self.verbose:
-                            result_preview = result[:200] + "..." if len(str(result)) > 200 else str(result)
-                            cprint(f"[Agent] 📄 Tool result: {result_preview}", "green")
-                        
-                        return str(result)
-                        
-                    except concurrent.futures.TimeoutError:
-                        cprint(f"[Agent] ⏰ Tool '{tool.name}' timed out after 10 seconds", "yellow")
-                        return f"Tool '{tool.name}' timed out"
-                    
-            except Exception as e:
                 if self.verbose:
-                    cprint(f"[Agent] ❌ Tool execution error: {e}", "red")
+                    result_text = result.get_text_content() if hasattr(result, 'get_text_content') else str(result)
+                    result_preview = result_text[:200] + "..." if len(result_text) > 200 else result_text
+                    cprint(f"[Agent] 📄 Tool result: {result_preview}", "green")
+                
+                # Return the text content for LangChain
+                if hasattr(result, 'get_text_content'):
+                    return result.get_text_content()
+                else:
+                    return str(result)
+                
+            except Exception as e:
+                error_msg = f"Tool execution failed: {str(e)}"
+                if self.verbose:
+                    cprint(f"[Agent] ❌ {error_msg}", "red")
                     import traceback
                     traceback.print_exc()
-                return f"Tool execution failed: {str(e)}"
+                return error_msg
         
         # Create proper parameter signature for LangChain compatibility
         from typing import Any
@@ -245,6 +163,8 @@ class ToolAwareAgent:
             ("system",
              "You are Opi, an on‑device assistant running on an Orange Pi. "
              "You have access to tools that can provide better information or perform actions. "
+             "IMPORTANT: Only call each tool ONCE per response. Do not repeat tool calls. "
+             "After getting a tool result, use it to answer the user's question directly. "
              "Be concise but helpful in your responses."),
             MessagesPlaceholder("chat_history"),
             ("user", "{input}"),
@@ -262,8 +182,10 @@ class ToolAwareAgent:
             agent=agent, 
             tools=tools, 
             verbose=self.verbose,
-            max_iterations=10,  # Allow 2 iterations max
-            early_stopping_method="force"  # Use supported method
+            max_iterations=3,  # Reduce from 10 to 3 to prevent loops
+            early_stopping_method="force",
+            max_execution_time=30,  # Add timeout
+            return_intermediate_steps=False  # Don't return intermediate steps
         )
 
     async def run(self, text: str, chat_history: List[BaseMessage] = None) -> str:
@@ -332,7 +254,7 @@ class ConversationManager:
         # Agent (tool‑aware) --------------------------------------------------
         if key and prov in LLM_WRAPPERS:
             try:
-                self.agent = ToolAwareAgent(prov, self.mcp, model, temp, key, verbose=True)
+                self.agent = ToolAwareAgent(prov, self.mcp, model, temp, key, verbose=False)
                 cprint(f"[LLM] ✅ {prov} agent ready", "green")
             except Exception as e:
                 cprint(f"[LLM] ⚠️  agent init failed: {e}", "yellow")

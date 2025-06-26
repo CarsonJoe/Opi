@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Opi Voice Assistant - Enhanced with LangSmith Tracing
+Opi Voice Assistant 
 Main application with voice + text input modes and comprehensive observability
 """
 
@@ -77,8 +77,7 @@ class LangSmithConfig:
                 cprint("           Set LANGSMITH_API_KEY in .env file to enable", "yellow")
 
 
-class EnhancedOpiVoiceAssistant:
-    """Enhanced Opi Voice Assistant with LangSmith integration."""
+class OpiVoiceAssistant:
 
     def __init__(self, config_path: Optional[str] = None):
         # Load environment variables first
@@ -124,7 +123,7 @@ class EnhancedOpiVoiceAssistant:
         self.text_only_mode = False
         self.hybrid_mode = False
 
-        # Enhanced metrics with LangSmith integration
+        # metrics with LangSmith integration
         self.streaming_metrics = {
             'total_interactions': 0,
             'first_audio_times': [],
@@ -250,10 +249,6 @@ class EnhancedOpiVoiceAssistant:
             
             await self.conversation_manager.initialize()
             
-            if self.langsmith_config.enabled:
-                cprint("[Opi] ✅ Enhanced conversation manager with LangSmith ready", "green")
-            else:
-                cprint("[Opi] ✅ Standard conversation manager ready", "green")
                 
         except Exception as e:
             cprint(f"[Opi] ❌ Failed to initialize enhanced conversation manager: {e}", "red")
@@ -452,7 +447,6 @@ class EnhancedOpiVoiceAssistant:
                     user_text, input_end_time, interaction_metadata
                 )
             else:
-                # Enhanced streaming with LangSmith
                 first_audio_time = await self.conversation_manager.process_user_input_streaming(
                     user_text,
                     input_end_time,
@@ -485,7 +479,7 @@ class EnhancedOpiVoiceAssistant:
                     cprint(f"[Opi] 🔍 Trace logged to LangSmith project: {self.langsmith_config.project_name}", "cyan")
 
         except Exception as e:
-            cprint(f"[Opi] ❌ Enhanced processing error: {e}", "red")
+            cprint(f"[Opi] ❌ Processing error: {e}", "red")
             if self.verbose:
                 import traceback
                 traceback.print_exc()
@@ -516,8 +510,7 @@ class EnhancedOpiVoiceAssistant:
             return time.time()
 
         except Exception as e:
-            cprint(f"[Opi] ❌ Enhanced text processing error: {e}", "red")
-            cprint("[Opi] 🤖 Sorry, I encountered an error processing your request.", "red")
+            cprint(f"[Opi] ❌ Text processing error: {e}", "red")
             return time.time()
 
     async def _streaming_main_loop(self):
@@ -707,7 +700,7 @@ class EnhancedOpiVoiceAssistant:
             cprint("="*70, "cyan", attrs=['bold'])
         else:
             # Simple summary
-            cprint(f"\n[Opi] Enhanced Session Summary:", "cyan")
+            cprint(f"\n[Opi] Session Summary:", "cyan")
             cprint(f"  Interactions: {metrics['total_interactions']}", "white")
             
             if metrics.get('text_inputs', 0) > 0 or metrics.get('voice_inputs', 0) > 0:
@@ -770,10 +763,10 @@ class EnhancedOpiVoiceAssistant:
         if self.verbose:
             self.timing_tracker.print_summary()
 
-        cprint("[Opi] ✅ Enhanced shutdown complete", "green")
+        cprint("[Opi] ✅ Shutdown complete", "green")
 
 
-def setup_signal_handlers(opi: EnhancedOpiVoiceAssistant):
+def setup_signal_handlers(opi: OpiVoiceAssistant):
     """Setup signal handlers for graceful shutdown."""
     def signal_handler(signum, frame):
         cprint(f"\n[Opi] Received signal {signum}, shutting down with LangSmith...", "yellow")
@@ -834,23 +827,21 @@ async def main():
         cprint("[Opi] ❌ Cannot use both --text and --hybrid modes", "red")
         sys.exit(1)
 
-    # Initialize Enhanced Opi with LangSmith
-    opi = EnhancedOpiVoiceAssistant(config_path=args.config)
+    opi = OpiVoiceAssistant(config_path=args.config)
     setup_signal_handlers(opi)
 
     # Show mode and verbose status
     if text_only_mode:
-        cprint("[Opi] 💬 TEXT-ONLY MODE WITH LANGSMITH", "cyan", attrs=['bold'])
+        cprint("[Opi] 💬 TEXT-ONLY MODE", "cyan", attrs=['bold'])
     elif hybrid_mode:
-        cprint("[Opi] 🎤💬 HYBRID MODE WITH LANGSMITH - Voice + Text", "cyan", attrs=['bold'])
+        cprint("[Opi] 🎤💬 HYBRID MODE", "cyan", attrs=['bold'])
     
     if opi.verbose:
-        cprint("[Opi] VERBOSE MODE ENABLED - Detailed logging with LangSmith active", "cyan", attrs=['bold'])
+        cprint("[Opi] VERBOSE MODE ENABLED ", "cyan", attrs=['bold'])
 
     try:
         await opi.initialize(text_only_mode=text_only_mode, hybrid_mode=hybrid_mode)
 
-        # Enhanced testing options
         if args.test_langsmith:
             cprint("[Opi] Testing LangSmith integration...", "cyan")
             if opi.langsmith_config.enabled:
