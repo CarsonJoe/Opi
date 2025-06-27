@@ -1,7 +1,10 @@
 # Core AI/LLM dependencies
 google-generativeai>=0.8.0
 langchain>=0.3.0
+langchain-core>=0.3.0
 langchain-google-genai>=2.0.0
+langchain-anthropic>=0.1.0
+langchain-openai>=0.1.0
 langgraph>=0.2.0
 
 # Voice processing
@@ -30,13 +33,34 @@ psutil>=5.9.0
 # HTTP client for MCP servers
 httpx>=0.24.0
 
-# Additional dependencies for FastMCP 2.x
+# Additional dependencies for FastMCP 2.x and async support
 anyio>=3.0.0
 pydantic>=2.0.0
 
-# Optional system dependencies (for Windows SAPI)
-# pywin32>=306; sys_platform == "win32"
+# Observability and tracing
+langsmith>=0.1.0
+
+# Optional system dependencies (uncomment if needed)
+# pywin32>=306; sys_platform == "win32"  # Windows SAPI support
 
 # Development/Testing
 pytest>=7.0.0
 pytest-asyncio>=0.21.0
+
+# Optional dependencies for enhanced functionality
+# Install these if you want to use specific features:
+#
+# For advanced audio processing:
+# pyaudio>=0.2.11
+# 
+# For GUI development (future):
+# tkinter  # Usually included with Python
+# 
+# For additional TTS backends:
+# gTTS>=2.3.0  # Google Text-to-Speech
+# 
+# For additional STT backends:
+# speech_recognition>=3.10.0
+# 
+# For enhanced logging:
+# structlog>=23.0.0
